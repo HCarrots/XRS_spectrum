@@ -310,15 +310,19 @@ def test_end_to_end(work_dir, mode, capsys):
         assert (figures / name).is_file(), f" QC  {name}"
 
 
-def test_regular_end_to_end_allows_empty_minipix(work_dir, capsys):
+@pytest.mark.parametrize("empty_detector", ["lambda", "minipix"])
+def test_regular_end_to_end_allows_one_empty_detector(
+    work_dir, capsys, empty_detector
+):
     config_path = build_case(work_dir / "case", mode="regular")
     cfg = Config.load(config_path)
-    minipix_path = cfg.resolve(cfg.get("elastic.regular_files.minipix"))
-    xrsp.write_regular_rois(minipix_path, [])
+    empty_path = cfg.resolve(cfg.get(f"elastic.regular_files.{empty_detector}"))
+    xrsp.write_regular_rois(empty_path, [])
 
     assert _run(config_path) == 0, capsys.readouterr().out
     elastic = np.load(cfg.state_dir / "elastic.npz", allow_pickle=False)
-    assert set(elastic["roi_detectors"].tolist()) == {"lambda"}
+    expected_detector = "minipix" if empty_detector == "lambda" else "lambda"
+    assert set(elastic["roi_detectors"].tolist()) == {expected_detector}
     assert int(elastic["mask_count"][0]) == len(REGULAR_BOXES)
 
 
@@ -569,7 +573,8 @@ def test_rectangle_editor_redraws_last_roi_and_preserves_selector(monkeypatch):
     plt.close("all")
 
 
-def test_rectangle_editor_enter_accepts_empty_detector(monkeypatch):
+@pytest.mark.parametrize("detector", ["Lambda", "Minipix"])
+def test_rectangle_editor_enter_accepts_empty_detector(monkeypatch, detector):
     def action(figure, state):
         assert getattr(figure.canvas.manager, "key_press_handler_id", None) is None
         _key(figure, "enter")
@@ -577,7 +582,7 @@ def test_rectangle_editor_enter_accepts_empty_detector(monkeypatch):
 
     ui, plt = _interactive_ui(monkeypatch, action)
     rectangles = ui.pick_rectangles(
-        np.zeros((30, 40)), ("A1", "A2"), "Draw Minipix rectangular ROIs"
+        np.zeros((30, 40)), ("A1", "A2"), f"Draw {detector} rectangular ROIs"
     )
     assert rectangles == []
     plt.close("all")
@@ -602,8 +607,11 @@ def test_regular_roi_saves_lambda_before_opening_minipix(work_dir):
         @staticmethod
         def pick_rectangles(_image, labels, title):
             opened.append(title)
+            if "Lambda" in title:
+                return []
             if "Minipix" in title:
                 assert lambda_path.is_file()
+                assert pd.read_csv(lambda_path, sep="\t").empty
             return [(str(labels[0]), 1, 4, 2, 6)]
 
     mode = _prepare_roi_inputs(
