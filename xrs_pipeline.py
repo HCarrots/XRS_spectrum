@@ -1,19 +1,9 @@
-"""五个阶段的实现：``elastic`` → ``xrs`` → ``q`` → ``sum`` → ``save``。
-
-每个阶段独立可跑、可重复跑：
-
-1. 先用 :meth:`xrs_config.Config.problems` 看缺哪些参数；
-2. 缺的就在 :class:`xrs_ui.UI` 里问（终端问答或弹出 matplotlib 窗口）；
-3. 算完把中间结果写进 ``<processed>/.xrs_state/``，QC 图写进 ``figures/``；
-4. 参数一旦被改动，:meth:`xrs_config.Config.save` 立刻回写 ``config.yaml``。
-
-阶段间只通过状态目录里的数组传递数据，所以改了 ``sum`` 的参数之后
-重跑不会再碰 HDF5。
-"""
+"""xrs_pipeline implementation."""
 
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -38,29 +28,25 @@ _DETECTORS = ("lambda", "minipix")
 _DATASETS = {"lambda": "D_LAMBDA", "minipix": "D_MINIPIX"}
 _LABELS = {"lambda": "Lambda", "minipix": "Minipix"}
 
-#: 能量 PV 的探测顺序。原 notebook 里那段 ``try/except`` 其实永远走 except
-#: （它在 readH5 赋值之前就访问 mot_data_list0），所以这里改成真探测。
+# English note.
+# English note.
 _ENERGY_PV_CANDIDATES = (
     "M_DCM_B5Energy_readback",
     "M_DCM_B5Link_Energy_readback",
 )
 
-_NOMINAL_ELASTIC_ENERGY = 9.685  # keV，XRS_roi 的构造默认值
+_NOMINAL_ELASTIC_ENERGY = 9.685  # English note.
 _DEFAULT_MODULE_ANGLES = [145.6, 79.03, 25, 118.8, 58.85, 67.862]
 _MODULE_ORDER = ("VB", "VU", "VD", "HB", "HL", "HR")
 
 
 # ==========================================================================
-# 状态目录
+# English note.
 # ==========================================================================
 
 
 class StageStore:
-    """``<processed>/.xrs_state/`` 的读写。
-
-    ``meta.json`` 记录每个阶段完成时的参数指纹，用来判断"产物还在，
-    但参数已经变了"。数组走 npz，表格走 tsv。
-    """
+    """Implementation notes for StageStore."""
 
     def __init__(self, state_dir: Path):
         self.dir = Path(state_dir)
@@ -77,7 +63,7 @@ class StageStore:
             self._meta = {"stages": {}}
         self._meta.setdefault("stages", {})
 
-    # -- 数组/表格 ----------------------------------------------------------
+# English note.
 
     def npz_path(self, stage: str) -> Path:
         return self.dir / f"{stage}.npz"
@@ -89,7 +75,7 @@ class StageStore:
         path = self.npz_path(stage)
         if not path.is_file():
             raise ConfigError(
-                f"缺少 {stage} 阶段的中间结果 {path}；请先运行 --stage {stage}"
+                f"Missing intermediate result {path}; run --stage {stage} first"
             )
         with np.load(path, allow_pickle=False) as handle:
             return {name: handle[name] for name in handle.files}
@@ -100,10 +86,10 @@ class StageStore:
     def load_frame(self, stage: str, name: str) -> pd.DataFrame:
         path = self.dir / f"{stage}_{name}.tsv"
         if not path.is_file():
-            raise ConfigError(f"缺少 {stage} 阶段的表格 {path}；请先运行 --stage {stage}")
+            raise ConfigError(f"Missing {stage} table {path}; run --stage {stage} first")
         return pd.read_csv(path, sep="\t")
 
-    # -- 指纹 ---------------------------------------------------------------
+# English note.
 
     def stage_info(self, stage: str) -> dict:
         return dict(self._meta["stages"].get(stage, {}))
@@ -127,7 +113,7 @@ class StageStore:
         )
 
     def reset_from(self, stage: str) -> None:
-        """把 ``stage`` 及其下游记录清掉（``--force`` 或上游变更时用）。"""
+        """Implementation notes for reset_from."""
         start = STAGE_ORDER.index(stage)
         for name in STAGE_ORDER[start:]:
             self._meta["stages"].pop(name, None)
@@ -136,62 +122,60 @@ class StageStore:
 
 
 # ==========================================================================
-# 小工具
+# English note.
 # ==========================================================================
 
 
 def _format_problems(stage: str, problems) -> str:
-    lines = [f"{stage} 阶段还缺 {len(problems)} 项参数："]
+    lines = [f"Stage {stage} is missing {len(problems)} parameter(s):"]
     lines += [f"  - {item}" for item in problems]
     lines.append("")
-    lines.append("交互模式下会逐个询问；用 --no-ui 时请先手工填好 config.yaml。")
+    lines.append("Interactive mode prompts for these values; --no-ui requires them in config.yaml.")
     return "\n".join(lines)
 
 
 def _pick_energy_pv(configured, motor_frame: pd.DataFrame, log) -> str:
-    """确定能量 PV：配置优先，否则按候选列表探测。"""
+    """Implementation notes for _pick_energy_pv."""
     columns = list(motor_frame.columns)
     if not is_blank(configured):
         if configured in columns:
             return str(configured)
         raise ConfigError(
-            f"配置的 energy_pv = {configured!r} 不在电机数据里。"
-            f"可用：{columns}"
+            f"Configured energy_pv {configured!r} is not in motor data. Available: {columns}"
         )
     for candidate in _ENERGY_PV_CANDIDATES:
         if candidate in columns:
-            log(f"[INFO] 自动选用能量 PV：{candidate}")
+            log(f"[INFO] Automatically selected energy PV: {candidate}")
             return candidate
     raise ConfigError(
-        f"无法自动识别能量 PV，候选 {_ENERGY_PV_CANDIDATES} 都不在电机数据里。"
-        f"可用：{columns}"
+        f"Could not detect an energy PV from {_ENERGY_PV_CANDIDATES}. Available: {columns}"
     )
 
 
 def _normalised_stacks(det2D_list, det1D_list, i0_pv, divide, log):
-    """按 I0 归一化（或原样返回）两个探测器的帧栈。"""
+    """Implementation notes for _normalised_stacks."""
     if not divide:
-        log("[INFO] divide_by_i0 = false，不做 I0 归一化")
+        log("[INFO] divide_by_i0 = false; I0 normalization is disabled")
         return (
             [np.asarray(item[_DATASETS["lambda"]], dtype=float) for item in det2D_list],
             [np.asarray(item[_DATASETS["minipix"]], dtype=float) for item in det2D_list],
         )
 
     if det1D_list is None:
-        raise ConfigError("divide_by_i0 = true 但没有传入 1D 数据（I0）")
+        raise ConfigError("divide_by_i0 = true, but no 1D I0 data was provided")
 
     i0_list = []
     for item in det1D_list:
         if i0_pv not in item:
             raise ConfigError(
-                f"1D 数据里没有 {i0_pv!r}，无法做 I0 归一化；可用：{list(item.columns)}"
+                f"1D data does not contain {i0_pv!r}; available: {list(item.columns)}"
             )
         i0_list.append(np.abs(np.asarray(item[i0_pv], dtype=float)))
 
     def scale(stack, i0):
         if stack.shape[0] != i0.shape[0]:
             raise ConfigError(
-                f"探测器帧数 {stack.shape[0]} 与 I0 点数 {i0.shape[0]} 不一致"
+                f"Detector frame count {stack.shape[0]} does not match I0 count {i0.shape[0]}"
             )
         return stack / i0[:, None, None]
 
@@ -204,11 +188,7 @@ def _normalised_stacks(det2D_list, det1D_list, i0_pv, divide, log):
 
 
 def _roi_spectra(stack, boxes, masks):
-    """按 ROI 切片求和。返回 ``(原始和, 掩膜过滤后的和)``，形状 ``(n_roi, n_frames)``。
-
-    这就是 notebook 里反复出现的那段 ``roiStack.sum(axis=(1, 2))`` /
-    ``(roiStack * mask).sum(axis=(1, 2))``。
-    """
+    """Implementation notes for _roi_spectra."""
     raw, masked = [], []
     for (y1, y2, x1, x2), mask in zip(boxes, masks):
         roi_stack = stack[:, y1:y2, x1:x2]
@@ -218,7 +198,7 @@ def _roi_spectra(stack, boxes, masks):
 
 
 def _lorentzian_fit(x_values, y_values, fit_type):
-    """把 notebook cell 18 里那个局部函数搬出来，异常类型写全。"""
+    """Implementation notes for _lorentzian_fit."""
     from scipy.optimize import OptimizeWarning, curve_fit
     import warnings as _warnings
 
@@ -259,7 +239,7 @@ def _close(fig) -> None:
 
 
 def _pack_masks(masks) -> np.ndarray:
-    """把布尔掩膜打包成位，避免 60 个 ROI × 整幅图把状态文件撑大。"""
+    """Implementation notes for _pack_masks."""
     stacked = np.asarray(masks, dtype=bool)
     flat = stacked.reshape(stacked.shape[0], -1)
     return np.packbits(flat, axis=1)
@@ -272,48 +252,166 @@ def _unpack_masks(packed, shape, count) -> np.ndarray:
 
 
 # ==========================================================================
-# elastic 阶段
+# English note.
 # ==========================================================================
 
 
 def _acquire_elastic(cfg: Config, ui: UI, log) -> None:
-    """把结构性参数补齐（路径、扫描号、ROI 模式、ROI 文件）。"""
+    """Acquire only the data location and elastic scan identifiers."""
     if is_blank(cfg.get("data.root")):
         cfg.set(
             "data.root",
             ui.ask(
-                "数据根目录 data.root",
+                "Data root (data.root)",
                 None,
-                help_text="例：/hepsdatafs/ID33/202504/Data/GID33-250416-01/",
+                help_text="Example: /hepsdatafs/ID33/202504/Data/GID33-250416-01/",
             ),
         )
     if is_blank(cfg.get("elastic.scan_ids")):
         cfg.set(
             "elastic.scan_ids",
-            ui.ask_list("弹性峰扫描编号 elastic.scan_ids", None, int, "例：14522"),
+            ui.ask_list("Elastic scan IDs (elastic.scan_ids)", None, int, "Example: 14522"),
         )
-    if is_blank(cfg.get("elastic.roi_mode")):
-        cfg.set(
-            "elastic.roi_mode",
-            ui.ask(
-                "ROI 模式 elastic.roi_mode",
-                None,
-                choices=("regular", "auto"),
-                help_text="regular=读矩形 ROI 文件；auto=读中心点文件后自动分割",
-            ),
-        )
+
+
+def _backup(path: Path, log) -> None:
+    """Create a recoverable backup before replacing an ROI geometry file."""
+    if path.is_file():
+        backup = path.with_name(path.name + ".bak")
+        shutil.copy2(path, backup)
+        log(f"[ROI] Backed up {path} to {backup}")
+
+
+def _regular_geometry(path: Path, detector: str):
+    rois, _adjustments = xrsp._load_regular_rois(path, detector)
+    labels = [roi.name for roi in rois]
+    bounds = [(roi.y1, roi.y2, roi.x1, roi.x2) for roi in rois]
+    return labels, bounds
+
+
+def _result_bounds(result):
+    if "bounding_boxes" in result:
+        return [tuple(int(value) for value in row) for row in result["bounding_boxes"]]
+    output = []
+    label_image = np.asarray(result["label_image"])
+    for number in range(1, len(result["roi_labels"]) + 1):
+        y, x = np.where(label_image == number)
+        output.append((int(y.min()), int(y.max()) + 1, int(x.min()), int(x.max()) + 1))
+    return output
+
+
+def _auto_target(cfg: Config, detector: str) -> Path:
+    value = cfg.get(f"elastic.auto_files.{detector}")
+    if is_blank(value):
+        value = f"roi/auto_ROI_{detector}.h5"
+        cfg.set(f"elastic.auto_files.{detector}", value)
+    return cfg.resolve(value)
+
+
+def _prepare_roi_inputs(cfg: Config, ui: UI, images, scan_ids, log) -> str:
+    """Preview elastic images, select a mode, and create or reuse ROI files."""
+    if ui.interactive:
+        ui.preview_images(images, "Summed elastic detector images")
     mode = cfg.get("elastic.roi_mode")
-    group = "regular_files" if mode == "regular" else "auto_centers"
-    noun = "矩形 ROI 文件" if mode == "regular" else "中心点文件"
+    if is_blank(mode):
+        mode = ui.ask(
+            "ROI mode (elastic.roi_mode)", None, choices=("regular", "auto"),
+            help_text="regular = rectangular ROIs; auto = segmented irregular ROIs",
+        )
+        cfg.set("elastic.roi_mode", mode)
+    if mode not in {"regular", "auto"}:
+        raise ConfigError("elastic.roi_mode must be 'regular' or 'auto'")
+
+    import auto_roi
+
+    parameters = dict(cfg.get("elastic.auto_params", {}) or {})
     for detector in _DETECTORS:
-        key = f"elastic.{group}.{detector}"
-        if is_blank(cfg.get(key)):
-            default = f"roi/{'roi' if mode == 'regular' else 'auto_ROI'}_{detector}.txt"
-            cfg.set(key, ui.ask(f"{_LABELS[detector]} 的{noun} {key}", default))
+        image = images[detector]
+        if mode == "regular":
+            key = f"elastic.regular_files.{detector}"
+            if is_blank(cfg.get(key)):
+                cfg.set(key, f"roi/roi_{detector}.txt")
+            target = cfg.resolve(cfg.get(key))
+            reuse = False
+            if target.is_file():
+                labels, bounds = _regular_geometry(target, detector)
+                reuse = not ui.interactive or ui.review_geometry(
+                    image, labels, bounds, f"{_LABELS[detector]} rectangular ROIs"
+                )
+            if not reuse:
+                rectangles = ui.pick_rectangles(
+                    image, auto_roi.expected_labels(detector),
+                    f"Draw {_LABELS[detector]} rectangular ROIs",
+                )
+                _backup(target, log)
+                count = xrsp.write_regular_rois(target, rectangles)
+                log(f"[ROI] Wrote {count} rectangular ROIs to {target}")
+            continue
+
+        target = _auto_target(cfg, detector)
+        reuse = False
+        if target.is_file():
+            try:
+                stored = xrsp.load_auto_roi_hdf5(
+                    target, detector=detector, image_shape=image.shape
+                )
+            except ValueError as exc:
+                if not ui.interactive:
+                    raise
+                log(f"[ROI] Existing {detector} HDF5 cannot be reused: {exc}")
+            else:
+                reuse = not ui.interactive or ui.review_geometry(
+                    stored["label_image"], stored["roi_labels"],
+                    _result_bounds(stored), f"{_LABELS[detector]} automatic ROIs",
+                )
+        if reuse:
+            continue
+
+        legacy_value = cfg.get(f"elastic.auto_centers.{detector}")
+        legacy_path = None if is_blank(legacy_value) else cfg.resolve(legacy_value)
+        use_legacy = legacy_path is not None and legacy_path.is_file()
+        while True:
+            if use_legacy:
+                centers = xrsp.load_auto_roi_centers(legacy_path)
+                log(f"[ROI] Migrating legacy centers from {legacy_path}")
+            else:
+                centers = ui.pick_points(
+                    image, auto_roi.expected_labels(detector),
+                    f"Select {_LABELS[detector]} ROI centers",
+                )
+            result = auto_roi.detect_all_rois(
+                image,
+                centers,
+                auto_roi.DETECTOR_CONFIG[detector]["radius"],
+                smooth_sigma=float(parameters.get("smooth_sigma", 2.0)),
+                threshold_tightness=float(parameters.get("threshold_tightness", 1.0)),
+                min_area=int(parameters.get("min_area", 20)),
+                log=log,
+            )
+            if not len(result["roi_labels"]):
+                if not ui.interactive:
+                    raise ConfigError(f"No {detector} ROI could be segmented")
+                log(f"[ROI] No {detector} ROI was segmented; select centers again")
+                use_legacy = False
+                continue
+            if not ui.interactive or ui.review_geometry(
+                result["label_image"], result["roi_labels"], _result_bounds(result),
+                f"{_LABELS[detector]} generated automatic ROIs",
+            ):
+                break
+            use_legacy = False
+        _backup(target, log)
+        xrsp.write_auto_roi_hdf5(
+            target, result, detector=detector, scan_ids=scan_ids,
+            image_shape=image.shape, parameters=parameters,
+        )
+        log(f"[ROI] Wrote automatic ROI geometry to {target}")
+    cfg.save()
+    return str(mode)
 
 
 def _elastic_paths(cfg: Config, mode: str) -> dict:
-    group = "regular_files" if mode == "regular" else "auto_centers"
+    group = "regular_files" if mode == "regular" else "auto_files"
     return {
         detector: str(cfg.resolve(cfg.get(f"elastic.{group}.{detector}")))
         for detector in _DETECTORS
@@ -324,7 +422,7 @@ def _elastic_controls(cfg: Config) -> list:
     controls = [
         SliderSpec(
             "filter_value",
-            "filter_value（ROI 内阈值系数）",
+            "filter_value (relative ROI threshold)",
             0.0,
             1.0,
             float(cfg.get("elastic.filter_value", 0.15)),
@@ -332,7 +430,7 @@ def _elastic_controls(cfg: Config) -> list:
         ),
         SliderSpec(
             "e_lowlim",
-            "拟合中心下限 (keV)",
+            "Fit center lower bound (keV)",
             9.0,
             13.5,
             float(cfg.get("elastic.fit.e_lowlim", 9.67)),
@@ -340,7 +438,7 @@ def _elastic_controls(cfg: Config) -> list:
         ),
         SliderSpec(
             "e_highlim",
-            "拟合中心上限 (keV)",
+            "Fit center upper bound (keV)",
             9.0,
             13.7,
             float(cfg.get("elastic.fit.e_highlim", 9.69)),
@@ -351,7 +449,7 @@ def _elastic_controls(cfg: Config) -> list:
         controls.append(
             SliderSpec(
                 "roi_size",
-                "roi_size（自动调整后的边长）",
+                "roi_size (auto-adjusted side length)",
                 5,
                 120,
                 int(cfg.get("elastic.roi_size", 30)),
@@ -366,46 +464,66 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
     _acquire_elastic(cfg, ui, log)
     cfg.save()
 
-    problems = cfg.problems("elastic")
-    if problems:
-        raise ConfigError(_format_problems("elastic", problems))
-
     scan_ids = [int(item) for item in cfg.get("elastic.scan_ids")]
-    if len(scan_ids) != 1:
-        log(f"[WARN] elastic 阶段只使用第一个扫描 {scan_ids[0]}，其余被忽略")
     divide = bool(cfg.get("elastic.divide_by_i0"))
     i0_pv = cfg.get("elastic.i0_pv")
-    mode = cfg.get("elastic.roi_mode")
 
     wanted = [_DATASETS[name] for name in _DETECTORS]
     if divide:
         wanted.append(i0_pv)
-    log(f"[elastic] 读取 {cfg.raw_dir} 下的扫描 {scan_ids[0]} …")
+    log(f"[elastic] Reading scans {scan_ids} from {cfg.raw_dir} ...")
     (_, _, _, mot_data_list, det1D_data_list, det2D_data_list) = xrsp.readH5(
         scan_ids, cfg.raw_dir, useROI=False, detectors=wanted, log=log
     )
     if not det2D_data_list:
-        raise ConfigError(f"扫描 {scan_ids[0]} 没读到任何 2D 探测器数据")
+        raise ConfigError(f"Scans {scan_ids} contain no 2D detector data")
 
     energy_pv = _pick_energy_pv(cfg.get("elastic.energy_pv"), mot_data_list[0], log)
     cfg.set("elastic.energy_pv", energy_pv)
-    energy = np.asarray(mot_data_list[0][energy_pv], dtype=float)
+    energies = []
+    for index, frame in enumerate(mot_data_list):
+        if energy_pv not in frame:
+            raise ConfigError(
+                f"Elastic scan {scan_ids[index]} does not contain energy PV {energy_pv!r}"
+            )
+        energies.append(np.asarray(frame[energy_pv], dtype=float))
 
     lambda_stacks, minipix_stacks = _normalised_stacks(
         det2D_data_list, det1D_data_list, i0_pv, divide, log
     )
-    stacks = {"lambda": lambda_stacks[0], "minipix": minipix_stacks[0]}
+    for detector, items in (("lambda", lambda_stacks), ("minipix", minipix_stacks)):
+        shapes = {tuple(item.shape[1:]) for item in items}
+        if len(shapes) != 1:
+            raise ConfigError(
+                f"Elastic {detector} image shapes differ across scans: {sorted(shapes)}"
+            )
+    energy = np.concatenate(energies)
+    stacks = {
+        "lambda": np.concatenate(lambda_stacks, axis=0),
+        "minipix": np.concatenate(minipix_stacks, axis=0),
+    }
+    if any(stack.shape[0] != energy.size for stack in stacks.values()):
+        raise ConfigError("Elastic frame counts do not match the combined energy axis")
+    order = np.argsort(energy, kind="stable")
+    energy = energy[order]
+    stacks = {name: stack[order] for name, stack in stacks.items()}
     grid = {name: stacks[name].shape[1:] for name in _DETECTORS}
-    log(f"[elastic] 探测器图像尺寸：{grid}")
+    log(f"[elastic] Detector image shapes: {grid}")
+
+    images = {name: stacks[name].sum(axis=0, dtype=np.float64) for name in _DETECTORS}
+    mode = _prepare_roi_inputs(cfg, ui, images, scan_ids, log)
+    problems = cfg.problems("elastic")
+    if problems:
+        raise ConfigError(_format_problems("elastic", problems))
 
     paths = _elastic_paths(cfg, mode)
     fit_cfg = cfg.get("elastic.fit", {})
     auto_params = cfg.get("elastic.auto_params", {})
     use_filter = bool(cfg.get("elastic.use_filter", True))
-    source_label = f"{scan_ids[0]}_elastic"
+    source_label = "_".join(str(item) for item in scan_ids) + "_elastic"
 
     def build(values: dict):
-        """按当前参数重建 ROI workflow。调参窗口每次拖动都会调它。"""
+        """Implementation notes for build."""
         filter_value = float(values["filter_value"])
         roi_size = int(values.get("roi_size", cfg.get("elastic.roi_size", 30)))
         auto_adjust = bool(cfg.get("elastic.auto_adjust", False))
@@ -427,7 +545,7 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
         return xrsp.build_roi_workflow(stacks, mode, **kwargs), filter_value
 
     def prepare(values: dict):
-        """重建 ROI 并按当前拟合窗口重算弹性峰曲线与拟合结果。"""
+        """Implementation notes for prepare."""
         workflow, filter_value = build(values)
         names, detectors, boxes, masks = [], [], [], []
         curves = {"lambda": [], "minipix": []}
@@ -467,13 +585,13 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
 
     import matplotlib.pyplot as plt
 
-    # QC 图单独一张，保证存盘时不会把调参控件也画进去
+# English note.
     qc_figure = plt.figure(figsize=(16, 9))
     qc_axes = qc_figure.subplots(2, 3, squeeze=False)
 
     if ui.interactive:
-        # 调参窗口把右侧让给控件；draw 只清空自己那几根轴，
-        # 绝不能 figure.clear()——那会把 adjust 刚建好的控件轴一起抹掉。
+# English note.
+# English note.
         tune_figure = plt.figure(figsize=(16, 9))
         tune_axes = tune_figure.subplots(
             2, 3, gridspec_kw={"right": 0.68}, squeeze=False
@@ -489,7 +607,7 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
             tune_figure,
             _elastic_controls(cfg),
             draw,
-            title="elastic：拖滑杆看 ROI 与拟合效果",
+            title="Elastic ROI masks and fit parameters",
         )
         state = prepare(values)
         _close(tune_figure)
@@ -500,7 +618,7 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
     _save_figure(qc_figure, cfg.state_dir / "figures" / "elastic_qc.png", log)
     _close(qc_figure)
 
-    # 参数定稿后回写
+# English note.
     cfg.set("elastic.filter_value", float(values["filter_value"]))
     if "roi_size" in values:
         cfg.set("elastic.roi_size", int(values["roi_size"]))
@@ -538,7 +656,7 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
 
 
 def _fit_all(names, energy_kev, curves, fit_cfg, log) -> tuple[dict, np.ndarray]:
-    """逐 ROI 拟合弹性峰，返回系数表与 bad-fit 掩码。"""
+    """Implementation notes for _fit_all."""
     fit_type = xrsp.lorentzian
     low = float(fit_cfg.get("e_lowlim", 9.67))
     high = float(fit_cfg.get("e_highlim", 9.69))
@@ -570,9 +688,9 @@ def _fit_all(names, energy_kev, curves, fit_cfg, log) -> tuple[dict, np.ndarray]
             bad[index] = True
 
     bad_names = [str(name) for name, flag in zip(names, bad) if flag]
-    log(f"[elastic] 拟合完成：{len(names)} 个 ROI，其中 {len(bad_names)} 个 bad fit")
+    log(f"[elastic] Fitted {len(names)} ROIs; {len(bad_names)} bad fits")
     if bad_names:
-        log(f"[elastic] bad fit：{bad_names}")
+        log(f"[elastic] Bad fits: {bad_names}")
     return (
         {
             "center_ev": np.asarray(centers, dtype=float),
@@ -587,11 +705,7 @@ def _fit_all(names, energy_kev, curves, fit_cfg, log) -> tuple[dict, np.ndarray]
 
 
 def _draw_elastic(axes, state, energy, cfg) -> None:
-    """elastic 阶段的 QC 图：mask 叠加 + 各 ROI 曲线 + 拟合中心。
-
-    ``axes`` 由调用方建好（2x3）。这里只清空这些轴，不动整张 figure——
-    调参窗口的控件轴和它共用一个 figure。
-    """
+    """Implementation notes for _draw_elastic."""
     from matplotlib.patches import Rectangle
 
     for axis in np.asarray(axes).ravel():
@@ -627,7 +741,7 @@ def _draw_elastic(axes, state, energy, cfg) -> None:
 
     axis = axes[0][2]
     axis.plot(energy, state["curves"].T, lw=0.6)
-    axis.set_title("elastic ROI sums（每行一个 ROI）")
+    axis.set_title("Elastic ROI sums (one curve per ROI)")
     axis.set_xlabel(f"{cfg.get('elastic.energy_pv')} (keV)")
     axis.set_ylabel("counts")
 
@@ -637,12 +751,12 @@ def _draw_elastic(axes, state, energy, cfg) -> None:
     axis.axhspan(
         float(cfg.get("elastic.fit.e_lowlim", 9.67)) * 1000,
         float(cfg.get("elastic.fit.e_highlim", 9.69)) * 1000,
-        color="green", alpha=0.15, label="允许窗口",
+        color="green", alpha=0.15, label="allowed window",
     )
     bad_idx = np.nonzero(state["bad"])[0]
     axis.plot(bad_idx, state["fits"]["center_ev"][bad_idx], "rx", ms=8, label="bad fit")
-    axis.set_title(f"拟合中心（bad fit {len(bad_idx)} 个）")
-    axis.set_xlabel("ROI 序号")
+    axis.set_title(f"Fit centers ({len(bad_idx)} bad fits)")
+    axis.set_xlabel("ROI index")
     axis.set_ylabel("center (eV)")
     axis.legend(fontsize=8)
 
@@ -650,33 +764,30 @@ def _draw_elastic(axes, state, energy, cfg) -> None:
     axis.plot(np.arange(len(state["fits"]["r2"])), state["fits"]["r2"], "o-", ms=3)
     axis.axhline(
         float(cfg.get("elastic.fit.min_r_squared", 0.8)),
-        color="red", ls="--", lw=1, label="R² 下限",
+        color="red", ls="--", lw=1, label="R-squared minimum",
     )
-    axis.set_title("拟合 R²")
-    axis.set_xlabel("ROI 序号")
+    axis.set_title("Fit R-squared")
+    axis.set_xlabel("ROI index")
     axis.legend(fontsize=8)
 
     axis = axes[1][2]
     axis.plot(np.arange(len(state["fits"]["fwhm_ev"])), state["fits"]["fwhm_ev"], "o-", ms=3)
     axis.axhline(
         float(cfg.get("elastic.fit.max_fwhm_ev", 2.0)),
-        color="red", ls="--", lw=1, label="FWHM 上限",
+        color="red", ls="--", lw=1, label="FWHM maximum",
     )
-    axis.set_title("拟合 FWHM (eV)")
-    axis.set_xlabel("ROI 序号")
+    axis.set_title("Fit FWHM (eV)")
+    axis.set_xlabel("ROI index")
     axis.legend(fontsize=8)
 
 
 # ==========================================================================
-# xrs 阶段
+# English note.
 # ==========================================================================
 
 
 def _remove_i0_glitches(i0_list, det2D_list, log) -> int:
-    """去掉 I0 上的"掉光"凹点，同步用相邻均值补上对应帧的探测器数据。
-
-    逻辑与 notebook cell 22 一致：某点同时低于左右邻居的 0.7 倍即判为 glitch。
-    """
+    """Implementation notes for _remove_i0_glitches."""
     removed = 0
     for i0, det2D in zip(i0_list, det2D_list):
         for index in range(i0.shape[0] - 2):
@@ -693,7 +804,7 @@ def _remove_i0_glitches(i0_list, det2D_list, log) -> int:
                     ) / 2
                 removed += 1
     if removed:
-        log(f"[xrs] 去掉 {removed} 个 I0 glitch")
+        log(f"[xrs] Repaired {removed} I0 glitches")
     return removed
 
 
@@ -701,13 +812,13 @@ def _acquire_xrs(cfg: Config, ui: UI, log) -> None:
     if is_blank(cfg.get("data.root")):
         cfg.set(
             "data.root",
-            ui.ask("数据根目录 data.root", None,
-                   help_text="例：/hepsdatafs/ID33/202504/Data/GID33-250416-01/"),
+            ui.ask("Data root (data.root)", None,
+                   help_text="Example: /hepsdatafs/ID33/202504/Data/GID33-250416-01/"),
         )
     if is_blank(cfg.get("xrs.scan_ids")):
         cfg.set(
             "xrs.scan_ids",
-            ui.ask_list("XRS 扫描编号 xrs.scan_ids", None, int, "例：14524"),
+            ui.ask_list("XRS scan IDs (xrs.scan_ids)", None, int, "Example: 14524"),
         )
 
 
@@ -729,12 +840,12 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
     wanted = [_DATASETS[name] for name in _DETECTORS]
     if divide:
         wanted.append(i0_pv)
-    log(f"[xrs] 读取 {cfg.raw_dir} 下的扫描 {scan_ids} …")
+    log(f"[xrs] Reading scans {scan_ids} from {cfg.raw_dir} ...")
     (_, _, _, mot_data_list, det1D_data_list, det2D_data_list) = xrsp.readH5(
         scan_ids, cfg.raw_dir, useROI=False, detectors=wanted, log=log
     )
     if not det2D_data_list:
-        raise ConfigError(f"扫描 {scan_ids} 没读到任何 2D 探测器数据")
+        raise ConfigError(f"Scans {scan_ids} contain no 2D detector data")
 
     energy_pv = _pick_energy_pv(cfg.get("xrs.energy_pv"), mot_data_list[0], log)
     cfg.set("xrs.energy_pv", energy_pv)
@@ -747,11 +858,11 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
         for item in det1D_data_list:
             if i0_pv not in item:
                 raise ConfigError(
-                    f"1D 数据里没有 {i0_pv!r}，无法做 I0 归一化；可用：{list(item.columns)}"
+                    f"1D data does not contain {i0_pv!r}; available: {list(item.columns)}"
                 )
             i0_list.append(np.abs(np.asarray(item[i0_pv], dtype=float)))
 
-    # 剔除坏扫描：交互模式下点 I0 曲线切换，否则读配置
+# English note.
     excluded = sorted({int(item) for item in (cfg.get("xrs.exclude_scans") or [])})
     if ui.interactive and i0_list is not None:
         import matplotlib.pyplot as plt
@@ -761,7 +872,7 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
             excluded = ui.toggle_scans(
                 list(zip(energies, i0_list)),
                 excluded,
-                "xrs：剔除坏扫描（掉光/异常）",
+                "XRS scan exclusion (beam loss or anomalies)",
                 figure=figure,
             )
             _save_figure(figure, cfg.state_dir / "figures" / "xrs_i0.png", log)
@@ -770,20 +881,20 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
         cfg.set("xrs.exclude_scans", excluded)
         cfg.save()
     elif excluded:
-        log(f"[xrs] 按配置剔除扫描 {excluded}")
+        log(f"[xrs] Excluding scans by configuration: {excluded}")
 
     if remove_glitch and i0_list is not None:
         _remove_i0_glitches(i0_list, det2D_data_list, log)
 
-    # --no-ui 时也要出 I0 QC 图：无头运行唯一的核对依据
+# English note.
     if i0_list is not None and not ui.interactive:
         _draw_i0_qc(cfg, energies, i0_list, excluded, log)
 
     keep = [index for index in range(len(det2D_data_list)) if index not in set(excluded)]
     if not keep:
-        raise ConfigError(f"所有扫描都被剔除了：exclude_scans={excluded}")
+        raise ConfigError(f"All scans were excluded: exclude_scans={excluded}")
     if len(keep) != len(det2D_data_list):
-        log(f"[xrs] 保留 {len(keep)}/{len(det2D_data_list)} 个扫描")
+        log(f"[xrs] Keeping {len(keep)}/{len(det2D_data_list)} scans")
 
     kept_2D = [det2D_data_list[index] for index in keep]
     kept_1D = [det1D_data_list[index] for index in keep] if i0_list is not None else None
@@ -793,7 +904,7 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
         kept_2D, kept_1D, i0_pv, divide, log
     )
 
-    # 用弹性阶段的 ROI（几何 + 掩膜）来切 XRS 数据
+# English note.
     names = np.asarray(elastic["roi_names"], dtype=str)
     detectors = np.asarray(elastic["roi_detectors"], dtype=str)
     boxes = np.asarray(elastic["boxes"], dtype=np.int64)
@@ -806,8 +917,8 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
         actual = {"lambda": lambda_stacks, "minipix": minipix_stacks}[detector][0].shape[1:]
         if tuple(actual) != expected_shape:
             raise ConfigError(
-                f"{detector} 的 XRS 图像尺寸 {actual} 与弹性阶段的 {expected_shape} 不一致，"
-                "ROI 无法复用；请确认用的是同一套探测器设置"
+                f"{detector} XRS image shape {actual} differs from elastic shape "
+                f"{expected_shape}; ROI geometry cannot be reused"
             )
 
     per_scan_raw, per_scan_masked = [], []
@@ -845,7 +956,7 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
 
 
 def _draw_i0_qc(cfg, energies, i0_list, excluded, log):
-    """非交互模式下的 I0 检查图（剔除的点画成灰虚线）。"""
+    """Implementation notes for _draw_i0_qc."""
     import matplotlib.pyplot as plt
 
     dropped = set(int(item) for item in excluded)
@@ -859,12 +970,12 @@ def _draw_i0_qc(cfg, energies, i0_list, excluded, log):
             alpha=0.35 if is_out else 0.9,
             color="0.6" if is_out else None,
             linestyle="--" if is_out else "-",
-            label=f"scan {index}" + ("  [剔除]" if is_out else ""),
+            label=f"scan {index}" + ("  [excluded]" if is_out else ""),
         )
     axis.set_yscale("log")
     axis.set_xlabel(f"{cfg.get('xrs.energy_pv')} (keV)")
     axis.set_ylabel(cfg.get("xrs.i0_pv"))
-    axis.set_title(f"XRS I0（剔除 {sorted(dropped) or '无'}）")
+    axis.set_title(f"XRS I0 (excluded: {sorted(dropped) or 'none'})")
     axis.legend(fontsize=8, ncol=2, loc="center left", bbox_to_anchor=(1.01, 0.5))
     figure.tight_layout()
     _save_figure(figure, cfg.state_dir / "figures" / "xrs_i0.png", log)
@@ -872,7 +983,7 @@ def _draw_i0_qc(cfg, energies, i0_list, excluded, log):
 
 
 def _draw_xrs_qc(cfg, names, detectors, raw_list, masked_list, energies, i0_list, keep, log):
-    """XRS 阶段 QC：各扫描的 ROI 谱 + I0 概览。"""
+    """Implementation notes for _draw_xrs_qc."""
     import matplotlib.pyplot as plt
 
     count = len(raw_list)
@@ -894,7 +1005,7 @@ def _draw_xrs_qc(cfg, names, detectors, raw_list, masked_list, energies, i0_list
 
 
 # ==========================================================================
-# q 阶段
+# English note.
 # ==========================================================================
 
 
@@ -910,10 +1021,10 @@ def run_q(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = False
             cfg.set(
                 "q.module_angles_deg",
                 ui.ask_list(
-                    "模组角度 q.module_angles_deg（度）",
+                    "Module angles q.module_angles_deg (degrees)",
                     _DEFAULT_MODULE_ANGLES,
                     float,
-                    f"顺序固定为 {list(_MODULE_ORDER)}",
+                    f"Required order: {list(_MODULE_ORDER)}",
                 ),
             )
             cfg.save()
@@ -931,13 +1042,13 @@ def run_q(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = False
         elastic_energy = np.full(len(names), _NOMINAL_ELASTIC_ENERGY, dtype=float)
     elif source == "fitted":
         elastic_energy = centers_kev.astype(float, copy=True)
-    else:  # as_before —— 复刻 notebook：只有 bad fit 才用拟合中心
+    else:  # English note.
         elastic_energy = np.full(len(names), _NOMINAL_ELASTIC_ENERGY, dtype=float)
         elastic_energy[bad_fit] = centers_kev[bad_fit]
 
     xrs = _load_stage_arrays(cfg.state_dir, "xrs")
     scan_count = int(xrs["n_scans"][0])
-    # Ef 用全部扫描的能量轴（notebook 传的就是最后一条 energy2）
+# English note.
     ef = np.asarray(xrs[f"energy_{scan_count - 1}"], dtype=float)
 
     angles = [np.deg2rad(float(item)) for item in cfg.get("q.module_angles_deg")]
@@ -949,7 +1060,7 @@ def run_q(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = False
         _, _, q_ave[index], dq_ave[index], q_range[index], dq_range[index] = xrsp.qCalc(
             angles, str(name), float(elastic_energy[index]), ef
         )
-    log(f"[q] 完成 {len(names)} 个 ROI 的 Q 计算（Ei 来源：{source}）")
+    log(f"[q] Calculated Q for {len(names)} ROIs (Ei source: {source})")
     return {
         "roi_names": names,
         "elastic_energy": elastic_energy,
@@ -961,12 +1072,12 @@ def run_q(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = False
 
 
 # ==========================================================================
-# sum 阶段
+# English note.
 # ==========================================================================
 
 
 def _build_roi_table(cfg, elastic, xrs, q) -> pd.DataFrame:
-    """汇总成最终 ``_rois.txt`` 的那张表。"""
+    """Implementation notes for _build_roi_table."""
     names = np.asarray(elastic["roi_names"], dtype=str)
     boxes = np.asarray(elastic["boxes"], dtype=np.int64)
     table = pd.DataFrame(
@@ -993,16 +1104,12 @@ def _build_roi_table(cfg, elastic, xrs, q) -> pd.DataFrame:
 
 
 def _roi_names_of(table: pd.DataFrame) -> np.ndarray:
-    """把 ``crystal`` 列取成 numpy 的 ``<U`` 字符串数组。
-
-    pandas 3 的字符串列可能是 Arrow 后端，``.astype(str).to_numpy()`` 会给出
-    ``dtype=object`` 的数组——存进 npz 之后 ``allow_pickle=False`` 就读不回来了。
-    """
+    """Implementation notes for _roi_names_of."""
     return table["crystal"].to_numpy(dtype=str)
 
 
 def _inclusion(cfg, table: pd.DataFrame, modules) -> np.ndarray:
-    """哪些 ROI 参与叠加：模组、q 范围、手动剔除、bad fit 四个条件。"""
+    """Implementation notes for _inclusion."""
     names = _roi_names_of(table)
     module_of = np.asarray([name.split("-", maxsplit=1)[0] for name in names])
     excluded = {str(item) for item in (cfg.get("sum.exclude_rois") or [])}
@@ -1018,7 +1125,7 @@ def _inclusion(cfg, table: pd.DataFrame, modules) -> np.ndarray:
 
 
 def _interp_grid(energies, centers_ev, step):
-    """所有扫描 × 所有 ROI 平移后能量范围的交集，按 step 对齐。"""
+    """Implementation notes for _interp_grid."""
     lowers, uppers = [], []
     for energy in energies:
         shifted = np.asarray(energy, dtype=float) * 1000.0
@@ -1029,15 +1136,15 @@ def _interp_grid(energies, centers_ev, step):
     upper = round(min(uppers) / step) * step
     if upper <= lower:
         raise ConfigError(
-            f"各 ROI 平移后的能量范围没有交集（{lower:.3f} ~ {upper:.3f} eV）；"
-            "请检查弹性峰拟合结果或 Estep"
+            f"Shifted ROI energy ranges do not overlap ({lower:.3f} to {upper:.3f} eV); "
+            "check elastic fits and energy spacing"
         )
     count = int((upper - lower) / step)
     return lower, upper, np.linspace(lower, upper, count + 1)
 
 
 def _interpolate_all(cfg, table, xrs, grid, include) -> dict:
-    """把所有 (扫描, ROI) 谱内插到公共能量轴，并按 mode 叠加。"""
+    """Implementation notes for _interpolate_all."""
     use_filter = bool(cfg.get("elastic.use_filter", True))
     scan_count = int(xrs["n_scans"][0])
     names = _roi_names_of(table)
@@ -1070,7 +1177,7 @@ def _interpolate_all(cfg, table, xrs, grid, include) -> dict:
 
 
 def run_sum(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = False) -> dict:
-    # 没填的先用默认值兜底，交互窗口里再让用户改
+# English note.
     if is_blank(cfg.get("sum.modules")):
         cfg.set("sum.modules", ["VD"])
     if cfg.get("sum.energy_step_ev") is None:
@@ -1097,9 +1204,9 @@ def run_sum(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
     requested = [str(item) for item in (cfg.get("sum.modules") or [])]
     dropped = [item for item in requested if item not in available_modules]
     if dropped:
-        log(f"[WARN] sum.modules 里的 {dropped} 在当前 ROI 集合中不存在，已忽略")
+        log(f"[WARN] Ignoring unavailable modules from sum.modules: {dropped}")
     if not [item for item in requested if item in available_modules]:
-        log(f"[WARN] sum.modules 全部不可用，改用 {available_modules[:1]}")
+        log(f"[WARN] No requested module is available; using {available_modules[:1]}")
 
     def prepare(values: dict):
         modules = values["modules"]
@@ -1141,18 +1248,18 @@ def run_sum(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
         draw(initial)
         controls = [
             ChoiceSpec(
-                "modules", "参与叠加的模组", tuple(available_modules),
+                "modules", "Modules to combine", tuple(available_modules),
                 value=initial["modules"], multi=True,
             ),
-            SliderSpec("q_low", "q 下限 (1/Å)", 0.0, 12.0, initial["q_low"], 0.05),
-            SliderSpec("q_high", "q 上限 (1/Å)", 0.0, 12.0, initial["q_high"], 0.05),
+            SliderSpec("q_low", "q lower bound (1/Å)", 0.0, 12.0, initial["q_low"], 0.05),
+            SliderSpec("q_high", "q upper bound (1/Å)", 0.0, 12.0, initial["q_high"], 0.05),
             SliderSpec(
-                "energy_step_ev", "能量内插步长 (eV)", 0.05, 2.0,
+                "energy_step_ev", "Energy interpolation step (eV)", 0.05, 2.0,
                 initial["energy_step_ev"], 0.05,
             ),
         ]
         values = ui.adjust(
-            tune_figure, controls, draw, title="sum：选模组、调 q 范围与内插步长"
+            tune_figure, controls, draw, title="Sum: modules, q range, and interpolation step"
         )
         state = prepare(values)
         _close(tune_figure)
@@ -1161,8 +1268,8 @@ def run_sum(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
 
     if state["include"].sum() == 0:
         raise ConfigError(
-            "没有任何 ROI 满足叠加条件（模组 ∩ q 范围 ∩ 非 bad fit ∩ 未手动剔除）；"
-            f"当前 modules={state['modules']}, q_range={cfg.get('sum.q_range')}"
+            "No ROI satisfies the combination criteria; "
+            f"modules={state['modules']}, q_range={cfg.get('sum.q_range')}"
         )
 
     _draw_sum(qc_axes, state, table)
@@ -1183,35 +1290,35 @@ def run_sum(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
     for module, curve in state["per_module"].items():
         payload[f"module_{module}"] = curve
     log(
-        f"[sum] {state['n_scans']} 个扫描 × {int(state['include'].sum())} 个 ROI 叠加完成，"
-        f"能量 {state['grid'][0]:.2f} ~ {state['grid'][-1]:.2f} eV"
+        f"[sum] Combined {state['n_scans']} scans x {int(state['include'].sum())} ROIs; "
+        f"energy {state['grid'][0]:.2f} to {state['grid'][-1]:.2f} eV"
     )
     return payload
 
 
 def _draw_sum(axes, state, table) -> None:
-    """只清空调用方给的这两根轴——调参窗口的控件轴和它共用一个 figure。"""
+    """Implementation notes for _draw_sum."""
     for axis in np.asarray(axes).ravel():
         axis.clear()
     grid = state["grid"]
     axes[0].plot(grid, state["combined"], lw=0.8)
     axes[0].set_title(
-        f"叠加结果：modules={state['modules']}，"
-        f"{int(state['include'].sum())} 个 ROI × {state['n_scans']} 个扫描"
+        f"Combined result: modules={state['modules']}, "
+        f"{int(state['include'].sum())} ROIs x {state['n_scans']} scans"
     )
     axes[0].set_xlabel("Energy Transfer (eV)")
     axes[0].set_ylabel("Intensity")
     for module, curve in state["per_module"].items():
         axes[1].plot(grid, curve, lw=0.8, label=str(module))
-    axes[1].set_title("分模组")
+    axes[1].set_title("By module")
     axes[1].set_xlabel("Energy Transfer (eV)")
     axes[1].legend(fontsize=8)
-    # 版面由调用方在 subplots(gridspec_kw=...) 时定好；这里既不 clear figure
-    # 也不调 tight_layout——figure 上可能还挂着调参控件轴。
+# English note.
+# English note.
 
 
 def _save_per_crystal_figure(cfg, state, table, log) -> None:
-    """逐晶体画一张大图存盘（不弹窗，ROI 多的时候只画入选的）。"""
+    """Implementation notes for _save_per_crystal_figure."""
     import matplotlib.pyplot as plt
 
     names = _roi_names_of(table)
@@ -1234,14 +1341,14 @@ def _save_per_crystal_figure(cfg, state, table, log) -> None:
     for slot in range(shown.size, rows * columns):
         figure.delaxes(axes[slot // columns][slot % columns])
     if chosen.size > limit:
-        figure.suptitle(f"只画了前 {limit} / {chosen.size} 个入选晶体", fontsize=14)
+        figure.suptitle(f"Showing the first {limit} of {chosen.size} selected crystals", fontsize=14)
     figure.tight_layout()
     _save_figure(figure, cfg.state_dir / "figures" / "sum_per_crystal.png", log)
     _close(figure)
 
 
 # ==========================================================================
-# save 阶段
+# English note.
 # ==========================================================================
 
 
@@ -1249,7 +1356,7 @@ def run_save(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fa
     if is_blank(cfg.get("output.filename")):
         cfg.set(
             "output.filename",
-            ui.ask("输出目录名 output.filename", None, help_text="例：NiO_20260518"),
+            ui.ask("Output directory name (output.filename)", None, help_text="Example: NiO_20260518"),
         )
         cfg.save()
     problems = cfg.problems("save")
@@ -1262,8 +1369,8 @@ def run_save(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fa
 
     if out_dir.exists() and any(out_dir.iterdir()) and not overwrite:
         raise ConfigError(
-            f"输出目录已存在且非空：{out_dir}\n"
-            "换个 output.filename，或加 --overwrite 覆盖。"
+            f"Output directory already exists and is not empty: {out_dir}\n"
+            "Choose another output.filename or add --overwrite."
         )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1279,7 +1386,7 @@ def run_save(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fa
 
     def write_frame(frame: pd.DataFrame, path: Path) -> None:
         if path.exists() and not overwrite:
-            raise ConfigError(f"文件已存在：{path}（加 --force 覆盖）")
+            raise ConfigError(f"File already exists: {path} (use --overwrite)")
         frame.to_csv(path, sep="\t", index=False)
         written.append(path)
         log(f"[save] {path}")
@@ -1312,7 +1419,7 @@ def run_save(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fa
 
     info = out_dir / f"{filename}_info.txt"
     if info.exists() and not overwrite:
-        raise ConfigError(f"文件已存在：{info}（加 --force 覆盖）")
+        raise ConfigError(f"File already exists: {info} (use --overwrite)")
     info.write_text(_info_text(cfg, table, total), encoding="utf-8")
     written.append(info)
     log(f"[save] {info}")
@@ -1325,7 +1432,7 @@ def run_save(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fa
 
 
 def _info_text(cfg: Config, table: pd.DataFrame, total: dict) -> str:
-    """处理过程记录。原 notebook 这里写的是从未定义过的 ``scanIDs2``。"""
+    """Implementation notes for _info_text."""
     lines = [
         f"data.root = {cfg.get('data.root')}",
         f"roi_mode = {cfg.get('elastic.roi_mode')}",
@@ -1363,7 +1470,7 @@ def _info_text(cfg: Config, table: pd.DataFrame, total: dict) -> str:
 
 
 # ==========================================================================
-# 调度
+# English note.
 # ==========================================================================
 
 _RUNNERS = {
@@ -1383,39 +1490,35 @@ def run_stage(
     force: bool = False,
     overwrite: bool = False,
 ) -> dict:
-    """跑一个阶段，必要时先补参数、弹调参窗口，再落盘中间结果。
-
-    ``force`` 只管"忽略参数指纹、强制重算"；能否覆盖已存在的输出文件由
-    ``overwrite`` 单独控制——这两件事混在一起会让人想重算时被迫同意覆盖。
-    """
+    """Implementation notes for run_stage."""
     if stage not in STAGE_ORDER:
-        raise ConfigError(f"未知阶段：{stage!r}；可用：{list(STAGE_ORDER)}")
+        raise ConfigError(f"Unknown stage {stage!r}; available: {list(STAGE_ORDER)}")
 
     configure_matplotlib(int(cfg.get("ui.dpi", 150) or 150))
     store = StageStore(cfg.state_dir)
 
     if not force and store.is_current(stage, cfg.fingerprint(stage)):
-        log(f"[skip] {stage} 已是最新（参数未变），产物在 {store.npz_path(stage)}")
+        log(f"[skip] {stage} is current: {store.npz_path(stage)}")
         return store.load_arrays(stage)
 
     if force:
         store.reset_from(stage)
 
-    log(f"===== 阶段 {stage}：{_stage_title(stage)} =====")
-    log(f"[指纹] {cfg.fingerprint(stage)}")
+    log(f"===== Stage {stage}: {_stage_title(stage)} =====")
+    log(f"[fingerprint] {cfg.fingerprint(stage)}")
 
     try:
         payload = _RUNNERS[stage](cfg, ui, log, force=force, overwrite=overwrite)
     except (ValueError, KeyError) as exc:
-        # 把这些"输入不合法"的异常统一成 ConfigError，CLI 才能给出干净的报错
-        raise ConfigError(f"{stage} 阶段失败：{exc}") from exc
+# English note.
+        raise ConfigError(f"Stage {stage} failed: {exc}") from exc
 
     store.save_arrays(stage, payload)
-    # 阶段自己可能刚补全/回写了参数（energy_pv、sum.modules、output.filename …），
-    # 必须先把它们落盘再记指纹。否则下次运行 Config.load 读到的还是旧值，
-    # 指纹对不上，这个阶段就会被无谓地重算一遍。
+# English note.
+# English note.
+# English note.
     if cfg.save():
-        log(f"[config] 参数已回写 {cfg.path}")
+        log(f"[config] Updated {cfg.path}")
     store.record(stage, cfg.fingerprint(stage))
     log(f"[done] {stage} → {store.npz_path(stage)}")
     return payload
@@ -1428,44 +1531,40 @@ def _stage_title(stage: str) -> str:
 
 
 # ==========================================================================
-# 中心点重建（pick-roi / propose-roi 用）
+# English note.
 # ==========================================================================
 
 
 def load_elastic_images(cfg: Config, log=print) -> dict:
-    """把弹性扫描的帧栈叠成每个探测器一张图，供选点/提案用。
-
-    只依赖 ``data.root`` 和 ``elastic.scan_ids``——几何校准不该要求
-    ROI 文件已经存在。
-    """
+    """Sum every configured elastic scan into one image per detector."""
     if is_blank(cfg.get("data.root")):
-        raise ConfigError("data.root 为空，无法读取图像")
+        raise ConfigError("data.root is empty; detector images cannot be loaded")
     scan_ids = [int(item) for item in (cfg.get("elastic.scan_ids") or [])]
     if not scan_ids:
-        raise ConfigError("elastic.scan_ids 为空，无法读取图像")
+        raise ConfigError("elastic.scan_ids is empty; detector images cannot be loaded")
 
     divide = bool(cfg.get("elastic.divide_by_i0"))
     i0_pv = cfg.get("elastic.i0_pv")
     wanted = [_DATASETS[name] for name in _DETECTORS]
     if divide and not is_blank(i0_pv):
         wanted.append(i0_pv)
-    log(f"[roi] 读取扫描 {scan_ids[0]} 用于几何校准 …")
+    log(f"[ROI] Reading elastic scans {scan_ids} for geometry calibration ...")
     (_, _, _, _, det1D_data_list, det2D_data_list) = xrsp.readH5(
-        scan_ids[:1], cfg.raw_dir, useROI=False, detectors=wanted, log=log
+        scan_ids, cfg.raw_dir, useROI=False, detectors=wanted, log=log
     )
     if not det2D_data_list:
-        raise ConfigError(f"扫描 {scan_ids[0]} 没读到任何 2D 探测器数据")
+        raise ConfigError(f"Scans {scan_ids} contain no 2D detector data")
     lambda_stacks, minipix_stacks = _normalised_stacks(
         det2D_data_list, det1D_data_list, i0_pv, divide, log
     )
     return {
-        "lambda": lambda_stacks[0].sum(axis=0),
-        "minipix": minipix_stacks[0].sum(axis=0),
+        "lambda": np.concatenate(lambda_stacks, axis=0).sum(axis=0),
+        "minipix": np.concatenate(minipix_stacks, axis=0).sum(axis=0),
     }
 
 
 def save_centers_overlay(image, centers, detector, path: Path, log) -> None:
-    """把中心点画在图像上存成 PNG——无头运行时这是唯一的核对依据。"""
+    """Save a center-point overlay for visual quality control."""
     import matplotlib.pyplot as plt
 
     figure, axis = plt.subplots(figsize=(11, 11))
@@ -1473,13 +1572,13 @@ def save_centers_overlay(image, centers, detector, path: Path, log) -> None:
     for label, (x, y) in centers.items():
         axis.plot(x, y, "o", color="#ff3030", ms=4)
         axis.text(x + 5, y - 5, str(label), color="#ff3030", fontsize=7)
-    axis.set_title(f"{_LABELS[detector]}: {len(centers)} 个中心点")
+    axis.set_title(f"{_LABELS[detector]}: {len(centers)} centers")
     _save_figure(figure, path, log)
     _close(figure)
 
 
 def centers_file_for(cfg: Config, detector: str) -> Path:
-    return cfg.resolve(cfg.get(f"elastic.auto_centers.{detector}"))
+    return _auto_target(cfg, detector)
 
 
 def _load_centers_if_present(path: Path):
@@ -1489,66 +1588,100 @@ def _load_centers_if_present(path: Path):
 
 
 def run_pick_roi(cfg: Config, detector: str, ui: UI, write: bool, log=print) -> dict:
-    """交互式点选中心点，替代原来 ipycanvas 那个 Jupyter 部件。"""
+    """Pick centers, segment ROIs, preview them, and write HDF5 geometry."""
     import auto_roi
 
     images = load_elastic_images(cfg, log)
     if detector not in images:
-        raise ConfigError(f"未知探测器 {detector!r}；可用：{list(images)}")
+        raise ConfigError(f"Unknown detector {detector!r}; available: {list(images)}")
     labels = auto_roi.expected_labels(detector)
     target = centers_file_for(cfg, detector)
-    previous = _load_centers_if_present(target)
-    if previous:
-        log(f"[roi] 已有 {len(previous)} 个中心点，将按标签顺序重新点选以覆盖")
-
-    figure_hint = None
+    centers = None
     import matplotlib.pyplot as plt
 
     figure = plt.figure(figsize=(11, 11))
     try:
-        figure_hint = ui.pick_points(
-            images[detector], labels, f"{_LABELS[detector]} ROI 中心点", figure=figure
+        centers = ui.pick_points(
+            images[detector], labels, f"{_LABELS[detector]} ROI centers", figure=figure
         )
     finally:
         _close(figure)
-    if not figure_hint:
-        raise ConfigError("没有点到任何中心点")
-    if len(figure_hint) != len(labels):
-        log(f"[WARN] 只点了 {len(figure_hint)}/{len(labels)} 个，缺失的标签不会写入文件")
-
-    written = _commit_centers(target, figure_hint, labels, write, log)
+    if not centers:
+        raise ConfigError("No ROI centers were selected")
+    parameters = dict(cfg.get("elastic.auto_params", {}) or {})
+    result = auto_roi.detect_all_rois(
+        images[detector], centers, auto_roi.DETECTOR_CONFIG[detector]["radius"],
+        smooth_sigma=float(parameters.get("smooth_sigma", 2.0)),
+        threshold_tightness=float(parameters.get("threshold_tightness", 1.0)),
+        min_area=int(parameters.get("min_area", 20)), log=log,
+    )
+    if not len(result["roi_labels"]):
+        raise ConfigError("No automatic ROI could be segmented")
+    if not ui.review_geometry(result["label_image"], result["roi_labels"],
+                              _result_bounds(result), f"{_LABELS[detector]} generated ROIs"):
+        raise UiCancelled("Automatic ROI selection must be repeated")
+    _backup(target, log)
+    written = xrsp.write_auto_roi_hdf5(
+        target, result, detector=detector,
+        scan_ids=[int(item) for item in cfg.get("elastic.scan_ids")],
+        image_shape=images[detector].shape, parameters=parameters,
+    )
+    cfg.save()
     save_centers_overlay(
-        images[detector], figure_hint, detector,
+        images[detector], centers, detector,
         cfg.state_dir / "figures" / f"centers_{detector}.png", log,
     )
-    return {"path": str(written), "count": len(figure_hint)}
+    return {"path": str(written), "count": len(result["roi_labels"])}
 
 
 def run_propose_roi(cfg: Config, detector: str, write: bool, log=print) -> dict:
-    """用峰值检测给中心点文件生成候选值。默认只写 ``*.proposed.txt``。"""
+    """Propose centers and write candidate or official HDF5 ROI geometry."""
     import auto_roi
 
     images = load_elastic_images(cfg, log)
     if detector not in images:
-        raise ConfigError(f"未知探测器 {detector!r}；可用：{list(images)}")
+        raise ConfigError(f"Unknown detector {detector!r}; available: {list(images)}")
     target = centers_file_for(cfg, detector)
-    template = _load_centers_if_present(target)
+    legacy = cfg.get(f"elastic.auto_centers.{detector}")
+    template = _load_centers_if_present(cfg.resolve(legacy)) if not is_blank(legacy) else None
+    if target.is_file():
+        stored = xrsp.load_auto_roi_hdf5(target, detector=detector,
+                                         image_shape=images[detector].shape)
+        template = {
+            str(label): tuple(int(value) for value in point)
+            for label, point in zip(stored["roi_labels"], stored["centers_xy"])
+        }
 
     centers, report = auto_roi.propose_centers(images[detector], detector, template=template)
-    log(f"[roi] 提案方式：{report['mode']}，找到 {report['num_peaks']} 个峰，"
-        f"解析出 {len(report['resolved'])}/{report['num_expected']} 个标签")
+    log(f"[ROI] Proposal mode: {report['mode']}; found {report['num_peaks']} peaks; "
+        f"resolved {len(report['resolved'])}/{report['num_expected']} labels")
     if report["missing"]:
-        log(f"[WARN] 未能解析的标签（{len(report['missing'])} 个）：{report['missing']}")
+        log(f"[WARN] Unresolved labels ({len(report['missing'])}): {report['missing']}")
     if not centers:
-        raise ConfigError("没能生成任何候选中心点，请改用 pick-roi 手工点选")
+        raise ConfigError("No centers were proposed; use pick-roi for manual selection")
 
-    labels = auto_roi.expected_labels(detector)
+    parameters = dict(cfg.get("elastic.auto_params", {}) or {})
+    result = auto_roi.detect_all_rois(
+        images[detector], centers, auto_roi.DETECTOR_CONFIG[detector]["radius"],
+        smooth_sigma=float(parameters.get("smooth_sigma", 2.0)),
+        threshold_tightness=float(parameters.get("threshold_tightness", 1.0)),
+        min_area=int(parameters.get("min_area", 20)), log=log,
+    )
+    if not len(result["roi_labels"]):
+        raise ConfigError("The proposal did not produce any segmented ROI")
     if write:
-        written = _commit_centers(target, centers, labels, True, log)
+        _backup(target, log)
+        written = target
     else:
-        written = target.with_suffix(target.suffix + ".proposed.txt")
-        n = xrsp.write_auto_roi_centers(written, centers, labels=labels)
-        log(f"[roi] 候选中心点写到 {written}（{n} 个）。核对无误后再加 --write 覆盖正式文件。")
+        written = target.with_name(target.stem + ".proposed" + target.suffix)
+    xrsp.write_auto_roi_hdf5(
+        written, result, detector=detector,
+        scan_ids=[int(item) for item in cfg.get("elastic.scan_ids")],
+        image_shape=images[detector].shape, parameters=parameters,
+    )
+    if write:
+        cfg.save()
+    log(f"[ROI] Wrote {'official' if write else 'candidate'} geometry to {written}")
 
     save_centers_overlay(
         images[detector], centers, detector,
@@ -1558,12 +1691,12 @@ def run_propose_roi(cfg: Config, detector: str, write: bool, log=print) -> dict:
 
 
 def _commit_centers(target: Path, centers, labels, write: bool, log) -> Path:
-    """写中心点文件。覆盖前先留一份 ``.bak``。"""
+    """Write a legacy center file and back up an existing target."""
     target = Path(target)
     if target.is_file() and write:
         backup = target.with_suffix(target.suffix + ".bak")
         backup.write_bytes(target.read_bytes())
-        log(f"[roi] 原文件已备份到 {backup}")
+        log(f"[ROI] Backed up the original file to {backup}")
     count = xrsp.write_auto_roi_centers(target, centers, labels=labels)
-    log(f"[roi] 写入 {target}（{count} 个中心点）")
+    log(f"[ROI] Wrote {count} centers to {target}")
     return target

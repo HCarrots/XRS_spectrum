@@ -1,13 +1,4 @@
-"""非矩形 ROI 的自动分割。
-
-流程：**中心点文件 → 每个中心做局部 Otsu 阈值 → 取连通域 → 重叠像素按最近中心归属**。
-
-这里刻意不包含任何 Jupyter 部件。原先那个 ipycanvas 点选控件
-（``select_roi_centers``）在现有调用链里其实**从未被执行**——调用方总是
-先把中心点文件读好传进来。所以"自动选 ROI"本来就是无头、可复现的，
-点选只是几何变化时用来重建中心点文件的独立步骤，见 :func:`propose_centers`
-和 ``run_xrs.py pick-roi``。
-"""
+"""Automatic segmentation of irregular ROIs from labeled center points."""
 
 from __future__ import annotations
 
@@ -25,7 +16,7 @@ DETECTOR_CONFIG = {
 
 
 def expected_labels(detector):
-    """按规范顺序返回该探测器的全部晶体标签。"""
+    """Return every crystal label for a detector in canonical order."""
     try:
         groups = DETECTOR_CONFIG[detector]["groups"]
     except KeyError as exc:
@@ -34,7 +25,7 @@ def expected_labels(detector):
 
 
 def _summed_image(data, name):
-    """把帧栈或已叠加的二维图统一成有限值的 float64 图像。"""
+    """Convert a frame stack or image into a finite float64 summed image."""
     image = np.asarray(data)
     if image.ndim == 3:
         if image.shape[0] == 0:
@@ -50,7 +41,7 @@ def _summed_image(data, name):
 
 
 def prepare_images(detectors):
-    """校验并叠加调用方传入的两个探测器数据。"""
+    """Validate and sum both detector inputs."""
     if not hasattr(detectors, "keys"):
         raise TypeError("detectors must map 'lambda' and 'minipix' to arrays")
     missing = [name for name in DETECTOR_CONFIG if name not in detectors]
@@ -60,7 +51,7 @@ def prepare_images(detectors):
 
 
 def _smoothed(image, smooth_sigma):
-    """分割前统一做的对数拉伸 + 高斯平滑。"""
+    """Apply log scaling and Gaussian smoothing before segmentation."""
     return gaussian(
         np.log1p(np.clip(np.asarray(image, dtype=float), 0, None)),
         sigma=smooth_sigma,
@@ -75,11 +66,11 @@ def segment_single_roi(
     threshold_tightness=1.0,
     min_area=20,
 ):
-    """分割以某个中心点为核心的连通域。失败时返回 ``(None, 原因)``。"""
+    """Segment the connected component around one center point."""
     height, width = smoothed_image.shape
     x, y = center_xy
     if not (0 <= x < width and 0 <= y < height):
-        return None, "centre is outside the image"
+        return None, "center is outside image"
 
     x0, x1 = max(0, x - max_radius), min(width, x + max_radius + 1)
     y0, y1 = max(0, y - max_radius), min(height, y + max_radius + 1)
@@ -132,11 +123,7 @@ def detect_all_rois(
     min_area=20,
     log=print,
 ):
-    """分割全部中心点，重叠像素归给最近的中心。
-
-    与 notebook 版本的区别：失败的 ROI 连同**原因**一起返回，
-    不再只是打印一行然后被静默丢掉。
-    """
+    """Segment all centers and assign overlapping pixels to the nearest one."""
     smoothed = _smoothed(image, smooth_sigma)
     successful, failed, reasons = [], [], {}
     for roi_name, center in centers.items():
@@ -164,12 +151,25 @@ def detect_all_rois(
     overlap_pixels = int(np.count_nonzero(overlap_count > 1))
     if overlap_pixels:
         log(f"[INFO] {overlap_pixels} overlap pixels assigned to nearest centres")
+    compact = np.zeros_like(label_image)
+    retained = []
+    for old_number, item in enumerate(successful, 1):
+        pixels = label_image == old_number
+        if np.any(pixels):
+            retained.append(item)
+            compact[pixels] = len(retained)
+        else:
+            roi_name = item[0]
+            failed.append(roi_name)
+            reasons[roi_name] = "all pixels were assigned to an overlapping ROI"
+            log(f"[FAILED] {roi_name}: {reasons[roi_name]}")
+    label_image = compact
     return {
         "label_image": label_image,
         "binary_mask": label_image > 0,
-        "roi_labels": np.asarray([item[0] for item in successful], dtype=str),
+        "roi_labels": np.asarray([item[0] for item in retained], dtype=str),
         "centers_xy": np.asarray(
-            [item[1] for item in successful], dtype=np.int32
+            [item[1] for item in retained], dtype=np.int32
         ).reshape(-1, 2),
         "failed_labels": np.asarray(failed, dtype=str),
         "failed_reasons": reasons,
@@ -186,16 +186,11 @@ def build_roi_session(
     min_area=20,
     log=print,
 ):
-    """对两个探测器分别做非规则 ROI 分割。
-
-    ``centers_by_detector`` 是必填的：中心点必须来自配置文件/中心点文件，
-    这样同一次分析才可复现。缺哪个探测器就直接报错，不再回退到点选控件。
-    """
+    """Segment irregular ROIs independently for both detectors."""
     images = prepare_images(detectors)
     if not centers_by_detector:
         raise ValueError(
-            "centers_by_detector is required: 中心点必须来自中心点文件，"
-            "请先用 `pick-roi` 或 `propose-roi` 生成"
+            "centers_by_detector is required; use pick-roi or propose-roi first"
         )
     selected, results = {}, {}
     for detector, config in DETECTOR_CONFIG.items():
@@ -203,7 +198,7 @@ def build_roi_session(
             raise KeyError(f"Missing ROI centres for {detector}")
         centers = dict(centers_by_detector[detector])
         if not centers:
-            raise ValueError(f"{detector} 的中心点为空")
+            raise ValueError(f"{detector} has no ROI centers")
         selected[detector] = centers
         results[detector] = detect_all_rois(
             images[detector],
@@ -223,12 +218,12 @@ def build_roi_session(
 
 
 # --------------------------------------------------------------------------
-# 中心点重建（几何变了才用，不参与常规分析流程）
+# Center reconstruction utilities for geometry changes.
 # --------------------------------------------------------------------------
 
 
 def _peaks(image, smooth_sigma, max_radius, threshold_rel, num_peaks):
-    """在平滑后的图像上找候选峰，返回 ``[(x, y), ...]``。"""
+    """Find candidate peaks in a smoothed image as ``(x, y)`` pairs."""
     from skimage.feature import peak_local_max
 
     smoothed = _smoothed(image, smooth_sigma)
@@ -239,16 +234,12 @@ def _peaks(image, smooth_sigma, max_radius, threshold_rel, num_peaks):
         num_peaks=num_peaks,
         exclude_border=False,
     )
-    # peak_local_max 返回 (row, col) = (y, x)
+    # peak_local_max returns (row, column), which is (y, x).
     return [(int(col), int(row)) for row, col in found]
 
 
 def _match_to_template(labels, template, peaks):
-    """把候选峰一对一配到模板位置上（最优分配）。
-
-    有旧中心点文件时这是主路径：探测器只是轻微漂移，多数点直接对得上，
-    只需要人工修正个别错配。
-    """
+    """Match candidate peaks one-to-one with a geometry template."""
     from scipy.optimize import linear_sum_assignment
     from scipy.spatial.distance import cdist
 
@@ -266,11 +257,7 @@ def _match_to_template(labels, template, peaks):
 
 
 def _assign_by_cluster(groups, peaks):
-    """没有模板时的兜底：先把峰聚成模组，再在每个模组内按 (y, x) 排成 5x3。
-
-    这一步纯属猜测——模组与 cluster 的对应关系靠质心位置猜，
-    **必须看图确认**。所以调用方默认只写到 ``*.proposed.txt``。
-    """
+    """Cluster peaks by module and order each module as a 5-by-3 grid."""
     from scipy.cluster.vq import kmeans2
 
     if not peaks:
@@ -291,7 +278,7 @@ def _assign_by_cluster(groups, peaks):
     centers = {}
     for group, cluster in zip(groups, order):
         members = points[assignment == cluster]
-        # 模组内部按 y 再按 x 排，正好对应 A1 A2 A3 B1 … E3
+        # Ordering by y and then x maps to A1, A2, A3, B1, ..., E3.
         members = members[np.lexsort((members[:, 0], members[:, 1]))]
         for suffix, point in zip(ROI_SUFFIXES, members):
             centers[f"{group}-{suffix}"] = (int(point[0]), int(point[1]))
@@ -305,11 +292,7 @@ def propose_centers(
     smooth_sigma=2.0,
     threshold_rel=0.25,
 ):
-    """给几何变化后的中心点文件生成候选值。
-
-    返回 ``(centers, report)``。``template`` 给旧中心点时用最优一对一匹配，
-    否则退化成"按模组聚类"的猜测。**结果一律需要人工看图确认。**
-    """
+    """Propose center points using a template match or cluster-based fallback."""
     labels = expected_labels(detector)
     groups = DETECTOR_CONFIG[detector]["groups"]
     radius = DETECTOR_CONFIG[detector]["radius"]

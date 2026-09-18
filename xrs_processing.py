@@ -308,7 +308,6 @@ _REGULAR_COLUMNS = (
     "x_expand",
     "y_expand",
 )
-_LAMBDA_MODULE_OFFSETS = {"VU": (5, 10), "VD": (-25, 85)}
 
 
 def _summed_detector(data, name):
@@ -376,11 +375,7 @@ def load_auto_roi_centers(filename):
 
 
 def write_auto_roi_centers(filename, centers, labels=None):
-    """把中心点写成 ``roi_label x y`` 三列文本（首行是列名）。
-
-    与 :func:`load_auto_roi_centers` 互为逆操作：写出来的文件可以原样读回。
-    ``labels`` 给定时按该顺序输出，方便和规范标签顺序逐个比对。
-    """
+    """Write legacy center points as ``roi_label x y`` text columns."""
     path = Path(filename)
     if path.parent and not path.parent.exists():
         path.parent.mkdir(parents=True)
@@ -394,6 +389,132 @@ def write_auto_roi_centers(filename, centers, labels=None):
     return len(lines) - 1
 
 
+AUTO_ROI_SCHEMA_VERSION = 1
+
+
+def write_auto_roi_hdf5(
+    filename,
+    result,
+    *,
+    detector,
+    scan_ids,
+    image_shape,
+    parameters,
+):
+    """Write a versioned automatic-ROI geometry file atomically."""
+    import json
+    import os
+
+    import h5py
+
+    path = Path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    labels = [str(item) for item in result["roi_labels"]]
+    label_image = np.asarray(result["label_image"], dtype=np.uint16)
+    centers = np.asarray(result["centers_xy"], dtype=np.int32).reshape(-1, 2)
+    bounds = []
+    for number in range(1, len(labels) + 1):
+        y, x = np.where(label_image == number)
+        if x.size == 0:
+            raise ValueError(f"ROI {labels[number - 1]!r} has no pixels")
+        bounds.append((int(y.min()), int(y.max()) + 1, int(x.min()), int(x.max()) + 1))
+    string_type = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(temporary, "w") as handle:
+        handle.attrs["schema_version"] = AUTO_ROI_SCHEMA_VERSION
+        handle.attrs["detector"] = str(detector)
+        handle.attrs["parameters_json"] = json.dumps(parameters, sort_keys=True)
+        handle.create_dataset("scan_ids", data=np.asarray(scan_ids, dtype=np.int64))
+        handle.create_dataset("image_shape", data=np.asarray(image_shape, dtype=np.int64))
+        handle.create_dataset("label_image", data=label_image, compression="gzip")
+        handle.create_dataset("roi_labels", data=np.asarray(labels, dtype=string_type))
+        handle.create_dataset("centers_xy", data=centers)
+        handle.create_dataset("bounding_boxes", data=np.asarray(bounds, dtype=np.int32))
+        failed = [str(item) for item in result.get("failed_labels", [])]
+        handle.create_dataset("failed_labels", data=np.asarray(failed, dtype=string_type))
+        reasons = result.get("failed_reasons", {})
+        handle.create_dataset(
+            "failed_reasons",
+            data=np.asarray([str(reasons.get(item, "")) for item in failed], dtype=string_type),
+        )
+        handle.attrs["overlap_pixels"] = int(result.get("overlap_pixels", 0))
+    os.replace(temporary, path)
+    return path
+
+
+def load_auto_roi_hdf5(filename, *, detector=None, image_shape=None):
+    """Load and validate an automatic-ROI HDF5 geometry file."""
+    import json
+
+    import h5py
+
+    path = Path(filename)
+    with h5py.File(path, "r") as handle:
+        version = int(handle.attrs.get("schema_version", -1))
+        if version != AUTO_ROI_SCHEMA_VERSION:
+            raise ValueError(
+                f"{path} uses unsupported auto ROI schema version {version}"
+            )
+        stored_detector = str(handle.attrs.get("detector", ""))
+        if detector is not None and stored_detector != detector:
+            raise ValueError(
+                f"{path} is for detector {stored_detector!r}, not {detector!r}"
+            )
+        stored_shape = tuple(int(item) for item in handle["image_shape"][:])
+        if image_shape is not None and stored_shape != tuple(image_shape):
+            raise ValueError(
+                f"{path} image shape {stored_shape} does not match {tuple(image_shape)}"
+            )
+        label_image = np.asarray(handle["label_image"][:], dtype=np.uint16)
+        labels = np.asarray(handle["roi_labels"].asstr()[:], dtype=str)
+        centers = np.asarray(handle["centers_xy"][:], dtype=np.int32).reshape(-1, 2)
+        bounds = np.asarray(handle["bounding_boxes"][:], dtype=np.int32).reshape(-1, 4)
+        failed = np.asarray(handle["failed_labels"].asstr()[:], dtype=str)
+        failed_reasons = np.asarray(handle["failed_reasons"].asstr()[:], dtype=str)
+        parameters = json.loads(str(handle.attrs.get("parameters_json", "{}")))
+        scan_ids = np.asarray(handle["scan_ids"][:], dtype=np.int64)
+        overlap_pixels = int(handle.attrs.get("overlap_pixels", 0))
+    if label_image.shape != stored_shape:
+        raise ValueError(f"{path} label_image shape does not match its metadata")
+    if len(labels) != len(centers) or len(labels) != len(bounds):
+        raise ValueError(f"{path} contains inconsistent ROI metadata lengths")
+    present = set(int(item) for item in np.unique(label_image))
+    expected = set(range(len(labels) + 1))
+    if not present.issubset(expected) or not set(range(1, len(labels) + 1)).issubset(present):
+        raise ValueError(f"{path} label_image does not match roi_labels")
+    return {
+        "label_image": label_image,
+        "binary_mask": label_image > 0,
+        "roi_labels": labels,
+        "centers_xy": centers,
+        "bounding_boxes": bounds,
+        "failed_labels": failed,
+        "failed_reasons": dict(zip(failed.tolist(), failed_reasons.tolist())),
+        "overlap_pixels": overlap_pixels,
+        "detector": stored_detector,
+        "image_shape": stored_shape,
+        "scan_ids": scan_ids,
+        "parameters": parameters,
+    }
+
+
+def write_regular_rois(filename, rectangles):
+    """Write rectangular ROI geometry using the editable TSV schema."""
+    path = Path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for label, x1, x2, y1, y2 in rectangles:
+        rows.append(
+            {
+                "roi_label": str(label), "x1": int(x1), "x2": int(x2),
+                "y1": int(y1), "y2": int(y2), "x_shift": 0, "y_shift": 0,
+                "x_expand": 0, "y_expand": 0,
+            }
+        )
+    pd.DataFrame(rows, columns=_REGULAR_COLUMNS).to_csv(path, sep="\t", index=False)
+    return len(rows)
+
+
 def _load_regular_rois(filename, detector):
     table = pd.read_csv(filename, sep="\t")
     missing = [column for column in _REGULAR_COLUMNS if column not in table.columns]
@@ -403,11 +524,6 @@ def _load_regular_rois(filename, detector):
     rois = []
     for index, row in enumerate(table.itertuples(index=False)):
         roi = XRS_roi(row.x1, row.x2, row.y1, row.y2, index, name=str(row.roi_label))
-        if detector == "lambda":
-            module = roi.name.split("-", maxsplit=1)[0]
-            x_shift, y_shift = _LAMBDA_MODULE_OFFSETS.get(module, (0, 0))
-            roi.x_shift(x_shift)
-            roi.y_shift(y_shift)
         rois.append(roi)
 
     adjustments = {
@@ -440,20 +556,30 @@ def _build_regular_detector(
     filter_value,
 ):
     rois, adjustments = _load_regular_rois(filename, detector)
-    masks, stacked_rois, pixel_counts = _regular_masks(image, rois, filter_value)
-
     if use_auto_adjust:
-        for index, (roi, stacked_roi) in enumerate(zip(rois, stacked_rois)):
+        _initial_masks, stacked_rois, _initial_counts = _regular_masks(
+            image, rois, filter_value
+        )
+        for roi, stacked_roi in zip(rois, stacked_rois):
             peak_y, peak_x = np.unravel_index(np.argmax(stacked_roi), image.shape)
             roi.x_shift(peak_x - roi.x_center)
             roi.y_shift(peak_y - roi.y_center)
             roi.set_x_width(roi_size)
             roi.set_y_width(roi_size)
-            roi.x_expand(adjustments["x_expand"][index])
-            roi.y_expand(adjustments["y_expand"][index])
-            roi.x_shift(adjustments["x_shift"][index])
-            roi.y_shift(adjustments["y_shift"][index])
-        masks, stacked_rois, pixel_counts = _regular_masks(image, rois, filter_value)
+
+    for index, roi in enumerate(rois):
+        roi.x_expand(adjustments["x_expand"][index])
+        roi.y_expand(adjustments["y_expand"][index])
+        roi.x_shift(adjustments["x_shift"][index])
+        roi.y_shift(adjustments["y_shift"][index])
+        roi.x1 = max(0, min(image.shape[1], roi.x1))
+        roi.x2 = max(0, min(image.shape[1], roi.x2))
+        roi.y1 = max(0, min(image.shape[0], roi.y1))
+        roi.y2 = max(0, min(image.shape[0], roi.y2))
+        roi._refresh_geometry()
+        if roi.x2 <= roi.x1 or roi.y2 <= roi.y1:
+            raise ValueError(f"Regular ROI {roi.name!r} is empty after adjustments")
+    masks, stacked_rois, pixel_counts = _regular_masks(image, rois, filter_value)
 
     return {
         "image": image,
@@ -512,11 +638,7 @@ def build_roi_workflow(
     on_roi_failure="warn",
     log=print,
 ):
-    """构建规则或非规则 ROI，返回两种模式统一的结果结构。
-
-    这里是同步的：原先的 ``async`` 只是为了在 auto 模式下等待 Jupyter
-    点选控件，而那个控件在调用链里从未被执行过。
-    """
+    """Build a unified ROI result for rectangular or automatic geometry."""
     if mode not in {"regular", "auto"}:
         raise ValueError("mode must be 'regular' or 'auto'")
     if not 0 <= filter_value <= 1:
@@ -555,10 +677,24 @@ def build_roi_workflow(
     import auto_roi
 
     centers = {}
+    stored_results = {}
     for detector in _DETECTORS:
         if detector not in auto_files:
             raise KeyError(f"Missing auto ROI file for {detector}")
-        centers[detector] = load_auto_roi_centers(auto_files[detector])
+        auto_path = Path(auto_files[detector])
+        if auto_path.suffix.lower() in {".h5", ".hdf5"}:
+            stored_results[detector] = load_auto_roi_hdf5(
+                auto_path, detector=detector, image_shape=images[detector].shape
+            )
+            centers[detector] = {
+                str(label): tuple(int(value) for value in point)
+                for label, point in zip(
+                    stored_results[detector]["roi_labels"],
+                    stored_results[detector]["centers_xy"],
+                )
+            }
+        else:
+            centers[detector] = load_auto_roi_centers(auto_path)
         height, width = images[detector].shape
         for label, (x, y) in centers[detector].items():
             if not 0 <= x < width or not 0 <= y < height:
@@ -566,24 +702,27 @@ def build_roi_workflow(
                     f"{detector} {label}: ({x}, {y}) is outside image {images[detector].shape}"
                 )
 
-        # 标签必须落在规范集合里，否则多半是拼写错误，静默丢 ROI 最难查
+        # Reject unknown labels instead of silently losing misspelled ROIs.
         expected = set(auto_roi.expected_labels(detector))
         unknown = sorted(set(centers[detector]) - expected)
         if unknown:
             raise ValueError(
-                f"{detector} 中心点文件含未知标签：{unknown}；"
-                f"合法标签形如 {sorted(expected)[:3]} …"
+                f"{detector} center file contains unknown labels {unknown}; "
+                f"valid labels include {sorted(expected)[:3]}"
             )
 
-    session = auto_roi.build_roi_session(
-        images,
-        centers_by_detector=centers,
-        source_label=source_label,
-        smooth_sigma=smooth_sigma,
-        threshold_tightness=threshold_tightness,
-        min_area=min_area,
-        log=log,
-    )
+    if len(stored_results) == len(_DETECTORS):
+        session = {"results": stored_results}
+    else:
+        session = auto_roi.build_roi_session(
+            images,
+            centers_by_detector=centers,
+            source_label=source_label,
+            smooth_sigma=smooth_sigma,
+            threshold_tightness=threshold_tightness,
+            min_area=min_area,
+            log=log,
+        )
     for detector in _DETECTORS:
         result = session["results"][detector]
         detected = set(str(label) for label in result["roi_labels"])
@@ -596,15 +735,15 @@ def build_roi_workflow(
         workflow[detector]["missing_labels"] = not_found
         workflow[detector]["expected_labels"] = sorted(expected)
         log(
-            f"[ROI] {detector}: 成功 {len(workflow[detector]['rois'])}/"
-            f"{len(centers[detector])}（规范标签共 {len(expected)} 个）"
+            f"[ROI] {detector}: segmented {len(workflow[detector]['rois'])}/"
+            f"{len(centers[detector])} centers ({len(expected)} canonical labels)"
         )
         if not_found:
-            log(f"[WARN] {detector} 未被分割出来的标签：{not_found}")
+            log(f"[WARN] {detector} labels not segmented: {not_found}")
         if workflow[detector]["failed_labels"] and on_roi_failure == "error":
             reasons = workflow[detector]["failed_reasons"]
             detail = "; ".join(f"{k}: {v}" for k, v in reasons.items())
-            raise ValueError(f"{detector} 有 ROI 分割失败（on_roi_failure=error）：{detail}")
+            raise ValueError(f"{detector} ROI segmentation failed: {detail}")
     return workflow
 
 
@@ -641,7 +780,7 @@ def plot_roi_masks(workflow, figsize=(20, 10)):
             )
             axis.text(roi.x2, roi.y2, roi.name, color="red")
         if failed or missing:
-            # 无头运行时这张图就是唯一的查错依据，失败项必须画在图上
+            # In headless runs this plot is the primary diagnostic artifact.
             note = []
             if failed:
                 note.append("failed: " + ", ".join(failed))

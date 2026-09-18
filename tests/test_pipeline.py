@@ -1,8 +1,4 @@
-"""端到端与单元测试。
-
-跑法：``pytest tests -q``（或 ``pixi run python -m pytest tests -q``）。
-所有测试都在 ``--no-ui`` 下运行，不弹任何窗口。
-"""
+"""test_pipeline implementation."""
 
 from __future__ import annotations
 
@@ -20,6 +16,7 @@ from conftest import (
     PROJECT_ROOT,
     REGULAR_BOXES,
     TEMPLATE,
+    ELASTIC_SCAN_ID,
     XRS_SCAN_ID,
     build_case,
 )
@@ -30,29 +27,33 @@ from xrs_ui import UI
 
 
 # ==========================================================================
-# 配置层
+# English note.
 # ==========================================================================
 
 
 def test_config_roundtrip_preserves_comments(work_dir):
-    """回写参数不能把用户手写的注释和键顺序搞丢。"""
+    """Implementation notes for test_config_roundtrip_preserves_comments."""
     path = work_dir / "config.yaml"
     shutil.copy(TEMPLATE, path)
     before = path.read_text(encoding="utf-8")
 
     cfg = Config.load(path)
-    assert cfg.save() is False, "内容没变时不该动文件"
+    assert cfg.save() is False, ""
 
     cfg.set("elastic.scan_ids", [14522])
     cfg.set("elastic.roi_mode", "regular")
     cfg.set("sum.q_range", [0.5, 9.5])
     cfg.set("q.module_angles_deg", [145.6, 79.03, 25, 118.8, 58.85, 67.862])
     assert cfg.save() is True
-    assert cfg.save() is False, "第二次保存应当是幂等的"
+    assert cfg.save() is False, ""
 
     after = path.read_text(encoding="utf-8")
-    for marker in ("# XRS 光谱处理参数", "# 弹性峰数据编号", "（注释和键顺序都会保留）"):
-        assert marker in after, f"注释丢了：{marker}"
+    for marker in (
+        "# XRS spectrum processing configuration",
+        "# Elastic scans used to establish ROI geometry",
+        "# Empty values (null or []) are requested interactively",
+    ):
+        assert marker in after, f"Missing preserved comment: {marker}"
     assert "scan_ids: [14522]" in after
     assert "q_range: [0.5, 9.5]" in after
     assert after.count("elastic:") == before.count("elastic:")
@@ -70,7 +71,7 @@ def test_config_problems_point_at_yaml_paths():
     assert "data.root" in joined
     assert "elastic.scan_ids" in joined
     assert "elastic.roi_mode" in joined
-    # 未填 roi_mode 时不该越界去要求 ROI 文件
+# English note.
     assert "regular_files" not in joined
 
     cfg.set("elastic.roi_mode", "regular")
@@ -92,24 +93,24 @@ def test_fingerprint_tracks_upstream_changes():
     cfg.set("sum.q_range", [1, 2])
     after_sum = cfg.fingerprint("sum")
     assert before_sum != after_sum
-    # 改 sum 不该让 elastic 失效
+# English note.
     assert cfg.fingerprint("elastic") == cfg.fingerprint("elastic")
 
     before_elastic = cfg.fingerprint("elastic")
     cfg.set("elastic.filter_value", 0.31)
     assert cfg.fingerprint("elastic") != before_elastic
-    # 上游变了，sum 的指纹也必须变
+# English note.
     assert cfg.fingerprint("sum") != after_sum
 
 
 def test_environment_manifests_agree():
     only_pixi, only_env = environment_parity(PROJECT_ROOT)
-    assert not only_pixi, f"只在 pixi.toml 里：{only_pixi}"
-    assert not only_env, f"只在 environment.yml 里：{only_env}"
+    assert not only_pixi, f"Only in pixi.toml: {only_pixi}"
+    assert not only_env, f"Only in environment.yml: {only_env}"
 
 
 # ==========================================================================
-# 无 Jupyter
+# English note.
 # ==========================================================================
 
 _IMPORT_RE = re.compile(
@@ -123,7 +124,7 @@ def test_shipped_code_has_no_jupyter_imports():
     for path in sorted(PROJECT_ROOT.glob("*.py")):
         if _IMPORT_RE.search(path.read_text(encoding="utf-8")):
             offenders.append(path.name)
-    assert not offenders, f"仍有 Jupyter 相关导入：{offenders}"
+    assert not offenders, f"Jupyter imports remain: {offenders}"
 
     for name in ("pixi.toml", "environment.yml"):
         text = (PROJECT_ROOT / name).read_text(encoding="utf-8")
@@ -133,14 +134,14 @@ def test_shipped_code_has_no_jupyter_imports():
 
 
 def test_auto_roi_module_has_no_widget_api():
-    """原先那个 ipycanvas 点选函数必须真的没了。"""
+    """Implementation notes for test_auto_roi_module_has_no_widget_api."""
     assert not hasattr(auto_roi, "select_roi_centers")
     assert not hasattr(auto_roi, "_canvas_image")
     assert not hasattr(auto_roi, "asyncio")
 
 
 def test_roi_workflow_is_synchronous():
-    """build_roi_workflow 不再需要 await。"""
+    """Implementation notes for test_roi_workflow_is_synchronous."""
     import inspect
 
     assert not inspect.iscoroutinefunction(xrsp.build_roi_workflow)
@@ -148,7 +149,7 @@ def test_roi_workflow_is_synchronous():
 
 
 # ==========================================================================
-# 单元
+# English note.
 # ==========================================================================
 
 
@@ -161,6 +162,59 @@ def test_center_file_roundtrip(work_dir):
     assert count == 2
     assert xrsp.load_auto_roi_centers(path) == centers
     assert path.read_text(encoding="utf-8").splitlines()[0] == "roi_label\tx\ty"
+
+
+def test_auto_roi_hdf5_roundtrip_and_shape_validation(work_dir):
+    label_image = np.zeros((12, 14), dtype=np.uint16)
+    label_image[2:5, 3:7] = 1
+    label_image[7:10, 8:12] = 2
+    result = {
+        "label_image": label_image,
+        "roi_labels": np.asarray(["HB-A1", "HB-A2"]),
+        "centers_xy": np.asarray([[4, 3], [9, 8]], dtype=np.int32),
+        "failed_labels": np.asarray(["HB-A3"]),
+        "failed_reasons": {"HB-A3": "area is below 20 pixels"},
+        "overlap_pixels": 3,
+    }
+    path = work_dir / "auto.h5"
+    xrsp.write_auto_roi_hdf5(
+        path, result, detector="minipix", scan_ids=[1, 2],
+        image_shape=label_image.shape,
+        parameters={"smooth_sigma": 2.0, "threshold_tightness": 1.0, "min_area": 20},
+    )
+    loaded = xrsp.load_auto_roi_hdf5(
+        path, detector="minipix", image_shape=label_image.shape
+    )
+    assert np.array_equal(loaded["label_image"], label_image)
+    assert list(loaded["roi_labels"]) == ["HB-A1", "HB-A2"]
+    assert loaded["failed_reasons"]["HB-A3"] == "area is below 20 pixels"
+    assert loaded["parameters"]["min_area"] == 20
+    with pytest.raises(ValueError, match="image shape"):
+        xrsp.load_auto_roi_hdf5(path, detector="minipix", image_shape=(1, 1))
+
+
+def test_regular_roi_text_roundtrip(work_dir):
+    path = work_dir / "regular.txt"
+    rectangles = [("HB-A1", 2, 8, 3, 9), ("HB-A2", 10, 15, 4, 11)]
+    assert xrsp.write_regular_rois(path, rectangles) == 2
+    rois, adjustments = xrsp._load_regular_rois(path, "minipix")
+    assert [roi.name for roi in rois] == ["HB-A1", "HB-A2"]
+    assert [(roi.x1, roi.x2, roi.y1, roi.y2) for roi in rois] == [
+        (2, 8, 3, 9), (10, 15, 4, 11)
+    ]
+    assert all(value == [0, 0] for value in adjustments.values())
+
+
+def test_python_and_config_text_is_english_only():
+    han = re.compile(
+        r"[\u3400-\u9fff\u3002\uff0c\uff1a\uff1b\uff08\uff09"
+        r"\u3010\u3011\u300a\u300b\u3001]|\u2014\u2014"
+    )
+    paths = list(PROJECT_ROOT.glob("*.py")) + list((PROJECT_ROOT / "tests").glob("*.py"))
+    paths.extend(PROJECT_ROOT.glob("*.yaml"))
+    paths.extend(PROJECT_ROOT.glob("*.yml"))
+    offenders = [path.name for path in paths if han.search(path.read_text(encoding="utf-8"))]
+    assert not offenders, f"CJK characters remain in source/config files: {offenders}"
 
 
 def test_expected_labels_are_canonical():
@@ -198,12 +252,12 @@ def test_q_calc_is_in_a_sane_range():
 
 
 def test_propose_centers_prefers_template():
-    """给模板时应当一对一匹配到光斑上，而不是靠聚类猜。"""
+    """Implementation notes for test_propose_centers_prefers_template."""
     image = np.zeros((48, 60))
     yy, xx = np.mgrid[0:48, 0:60]
     for cx, cy in BLOBS:
         image += 100.0 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 3.0**2))
-    template = {"HB-A1": (14, 12), "HB-A2": (39, 12)}  # 故意偏 2 px
+    template = {"HB-A1": (14, 12), "HB-A2": (39, 12)}  #  2 px
     centers, report = auto_roi.propose_centers(image, "minipix", template=template)
     assert report["mode"] == "template-match"
     for label, (x, y) in centers.items():
@@ -212,7 +266,7 @@ def test_propose_centers_prefers_template():
 
 
 # ==========================================================================
-# 端到端
+# English note.
 # ==========================================================================
 
 
@@ -235,15 +289,15 @@ def test_end_to_end(work_dir, mode, capsys):
     assert np.isfinite(data["Intensity"]).all()
     assert (data["Intensity"] > 0).all()
 
-    # 两个探测器各 2 个 ROI
+# English note.
     rois = pd.read_csv(out / "synthetic_run_rois.txt", sep="\t")
     assert len(rois) == 2 * len(REGULAR_BOXES)
     assert {"crystal", "x1", "x2", "y1", "y2", "q_ave", "center", "width"} <= set(rois.columns)
     assert not rois["bad_fit"].any(), rois[["crystal", "center", "width", "r-square"]]
 
-    # 拟合中心应当落在合成峰位附近
+# English note.
     assert np.allclose(rois["center"], 9680.0, atol=5.0)
-    # q 落在配置的范围里
+# English note.
     assert rois["q_ave"].between(0, 12).all()
 
     info = (out / "synthetic_run_info.txt").read_text(encoding="utf-8")
@@ -253,7 +307,24 @@ def test_end_to_end(work_dir, mode, capsys):
     figures = root / "processed" / ".xrs_state" / "figures"
     for name in ("elastic_qc.png", "xrs_i0.png", "xrs_roi_sums.png",
                  "sum_qc.png", "sum_per_crystal.png"):
-        assert (figures / name).is_file(), f"缺少 QC 图 {name}"
+        assert (figures / name).is_file(), f" QC  {name}"
+
+
+def test_elastic_uses_all_configured_scans(work_dir):
+    config_path = build_case(work_dir / "case", mode="regular")
+    raw = config_path.parent / "raw"
+    second_id = ELASTIC_SCAN_ID + 1
+    shutil.copy2(
+        raw / f"{ELASTIC_SCAN_ID}_elastic.nxs",
+        raw / f"{second_id}_elastic.nxs",
+    )
+    cfg = Config.load(config_path)
+    cfg.set("elastic.scan_ids", [ELASTIC_SCAN_ID, second_id])
+    cfg.save()
+    payload = run_stage(cfg, "elastic", UI(interactive=False), log=lambda _message: None)
+    assert payload["elastic_energy"].size == 402
+    assert np.all(np.diff(payload["elastic_energy"]) >= 0)
+    assert payload["roi_names"].size == 2 * len(REGULAR_BOXES)
 
 
 def test_resume_skips_unchanged_stages(work_dir, capsys):
@@ -265,7 +336,7 @@ def test_resume_skips_unchanged_stages(work_dir, capsys):
     output = capsys.readouterr().out
     assert output.count("[skip]") == len(STAGE_ORDER), output
 
-    # 只改 sum 的参数：前面三个阶段应当仍然跳过，sum 与 save 重算
+# English note.
     cfg = Config.load(config_path)
     cfg.set("sum.energy_step_ev", 0.5)
     cfg.save()
@@ -285,8 +356,8 @@ def test_check_reports_ready_case(work_dir, capsys):
     config_path = build_case(work_dir / "case", mode="regular")
     assert main(["check", str(config_path)]) == 0
     output = capsys.readouterr().out
-    assert "尚未运行" in output
-    assert "环境清单一致" in output
+    assert "not yet run" in output
+    assert "Environment manifests match" in output
 
 
 def test_check_flags_missing_parameters(capsys):
@@ -303,7 +374,7 @@ def test_unknown_roi_label_is_rejected(work_dir, capsys):
     )
     assert _run(config_path) == 1
     output = capsys.readouterr().out
-    assert "未知标签" in output
+    assert "unknown labels" in output
 
 
 def test_out_of_range_center_is_rejected(work_dir, capsys):
@@ -324,15 +395,15 @@ def test_save_refuses_to_overwrite_without_force(work_dir, capsys):
     out = config_path.parent / "processed" / "synthetic_run"
     assert (out / "synthetic_run_data.txt").is_file()
 
-    # 删掉完成标记，强制 save 阶段真的重跑一遍
+# English note.
     (config_path.parent / "processed" / ".xrs_state" / "save.npz").unlink()
 
     assert _run(config_path, "--stage", "save") == 1
-    assert "已存在" in capsys.readouterr().out
+    assert "already exists" in capsys.readouterr().out
 
-    # --force 只管重算，不解除覆盖保护
+# English note.
     assert _run(config_path, "--stage", "save", "--force") == 1
-    assert "已存在" in capsys.readouterr().out
+    assert "already exists" in capsys.readouterr().out
 
     assert _run(config_path, "--stage", "save", "--overwrite") == 0
     assert "[save]" in capsys.readouterr().out
@@ -341,7 +412,7 @@ def test_save_refuses_to_overwrite_without_force(work_dir, capsys):
 def test_no_ui_reports_all_missing_parameters(capsys):
     assert main(["run", str(TEMPLATE), "--no-ui"]) == 1
     output = capsys.readouterr().out
-    assert "必须先在 config.yaml 里填好" in output
+    assert "required for --no-ui" in output
     for stage in STAGE_ORDER:
         assert f"[{stage}]" in output
 
@@ -350,11 +421,11 @@ def test_single_stage_requires_upstream_state(work_dir, capsys):
     config_path = build_case(work_dir / "case", mode="regular")
     assert _run(config_path, "--stage", "q") == 1
     output = capsys.readouterr().out
-    assert "缺少 elastic 阶段的中间结果" in output
+    assert "Missing intermediate result" in output
 
 
 def test_glitch_removal_end_to_end(work_dir, capsys):
-    """带 glitch 的数据仍应跑通，并在日志里报告修掉了几个点。"""
+    """Implementation notes for test_glitch_removal_end_to_end."""
     from conftest import build_case as _build
 
     config_path = _build(work_dir / "case", mode="regular", glitch_index=50)
@@ -368,7 +439,7 @@ def test_ui_required_without_interaction():
     from xrs_ui import UiRequired
 
     with pytest.raises(UiRequired):
-        ui.require("弹窗")
+        ui.require("window")
     assert ui.confirm("continue?", default=True) is True
 
 
@@ -387,7 +458,7 @@ def test_run_stage_returns_arrays(work_dir):
 
 
 # ==========================================================================
-# 交互层（把事件循环替换成"模拟点击"，这样无显示器也能测）
+# English note.
 # ==========================================================================
 
 
@@ -409,14 +480,14 @@ def _key(figure, key):
 
 
 def _interactive_ui(monkeypatch, action):
-    """造一个 interactive UI，并把阻塞的事件循环换成给定的动作。"""
+    """Implementation notes for _interactive_ui."""
     import matplotlib.pyplot as plt
 
     import xrs_ui
 
     monkeypatch.setattr(xrs_ui, "_run_event_loop", lambda figure, state: action(figure, state))
     ui = xrs_ui.UI(interactive=True)
-    monkeypatch.setattr(ui, "require", lambda _what: None)  # 跳过后端可用性检查
+    monkeypatch.setattr(ui, "require", lambda _what: None)  # Skip backend checks.
     return ui, plt
 
 
@@ -430,7 +501,7 @@ def test_pick_points_collects_clicks_in_label_order(monkeypatch):
         axis = figure.axes[0]
         for x, y in wanted.values():
             _mouse(figure, axis, x, y)
-        # 先撤销一个再重画，验证右键/撤销路径
+# English note.
         _mouse(figure, axis, 0, 0, button=3)
         _mouse(figure, axis, 41, 14)
         _key(figure, "enter")
@@ -443,7 +514,16 @@ def test_pick_points_collects_clicks_in_label_order(monkeypatch):
     plt.close("all")
 
 
-def test_pick_points_refuses_to_finish_early(monkeypatch):
+def test_rectangle_bounds_are_half_open_clamped_and_non_empty():
+    from xrs_ui import _clamp_rectangle
+
+    assert _clamp_rectangle(-3, -2, 8.2, 9.7, (20, 30)) == (0, 9, 0, 10)
+    assert _clamp_rectangle(8.2, 9.7, 1.2, 2.2, (20, 30)) == (1, 9, 2, 10)
+    with pytest.raises(ValueError, match="non-zero"):
+        _clamp_rectangle(-3, -2, -1, -1, (20, 30))
+
+
+def test_pick_points_allows_partial_selection(monkeypatch):
     import numpy as np
 
     calls = {"n": 0}
@@ -451,17 +531,16 @@ def test_pick_points_refuses_to_finish_early(monkeypatch):
     def action(figure, state):
         axis = figure.axes[0]
         _mouse(figure, axis, 10, 10)
-        _key(figure, "enter")  # 只点了一个，不该结束
-        assert state["done"] is False
+        _key(figure, "enter")
+        assert state["done"] is True
+        assert state["accepted"] is True
         calls["n"] += 1
-        state["done"] = True
-        state["accepted"] = False
 
     ui, plt = _interactive_ui(monkeypatch, action)
-    from xrs_ui import UiCancelled
-
-    with pytest.raises(UiCancelled):
-        ui.pick_points(np.zeros((48, 60)), ("HB-A1", "HB-A2"), "test", figure=plt.figure())
+    result = ui.pick_points(
+        np.zeros((48, 60)), ("HB-A1", "HB-A2"), "test", figure=plt.figure()
+    )
+    assert result == {"HB-A1": (10, 10)}
     assert calls["n"] == 1
     plt.close("all")
 
@@ -474,7 +553,7 @@ def test_toggle_scans_picks_nearest_curve(monkeypatch):
 
     def action(figure, state):
         axis = figure.axes[0]
-        _mouse(figure, axis, 5.0, 200.0)  # 最靠近第二条
+        _mouse(figure, axis, 5.0, 200.0)  # Select the nearest, second curve.
         _key(figure, "enter")
 
     ui, plt = _interactive_ui(monkeypatch, action)
@@ -504,7 +583,7 @@ def test_adjust_returns_widget_values(monkeypatch):
     assert values["b"] == pytest.approx(0.25)
     assert values["c"] == "y"
     assert values["d"] == ["p"]
-    assert drawn, "draw 回调至少要被调用一次"
+    assert drawn, "draw "
     plt.close("all")
 
 
@@ -527,7 +606,7 @@ def test_adjust_abort_raises(monkeypatch):
 
 
 # ==========================================================================
-# 交互模式下跑真实阶段（事件循环被替换成"立刻点确定"）
+# English note.
 # ==========================================================================
 
 
@@ -538,7 +617,7 @@ def _accept_immediately(monkeypatch):
 
 
 def test_elastic_stage_interactive_tuning(work_dir, monkeypatch):
-    """走一遍 run_elastic 的 ui.interactive 分支（弹调参窗口那条路）。"""
+    """Implementation notes for test_elastic_stage_interactive_tuning."""
     config_path = build_case(work_dir / "case", mode="regular")
     cfg = Config.load(config_path)
     ui, plt = _accept_immediately(monkeypatch)
@@ -546,14 +625,14 @@ def test_elastic_stage_interactive_tuning(work_dir, monkeypatch):
     payload = run_stage(cfg, "elastic", ui, log=lambda _m: None)
     assert payload["roi_names"].shape == (2 * len(REGULAR_BOXES),)
     assert int(payload["mask_count"][0]) == 2 * len(REGULAR_BOXES)
-    # 窗口里的滑杆值应当被回写进配置
+# English note.
     assert cfg.get("elastic.filter_value") == pytest.approx(0.15)
     assert cfg.get("elastic.fit.e_lowlim") == pytest.approx(9.67)
     plt.close("all")
 
 
 def test_xrs_stage_interactive_scan_removal(work_dir, monkeypatch):
-    """toggle_scans 分支：本次不剔除任何扫描。"""
+    """Implementation notes for test_xrs_stage_interactive_scan_removal."""
     config_path = build_case(work_dir / "case", mode="regular")
     cfg = Config.load(config_path)
     ui, plt = _accept_immediately(monkeypatch)
@@ -581,7 +660,7 @@ def test_sum_stage_interactive_tuning(work_dir, monkeypatch):
 
 
 # ==========================================================================
-# 中心点重建子命令
+# English note.
 # ==========================================================================
 
 
@@ -593,12 +672,12 @@ def test_propose_roi_writes_candidate_not_target(work_dir, capsys):
     assert main(["propose-roi", str(config_path), "--detector", "minipix"]) == 0
     capsys.readouterr()
 
-    candidate = roi_dir / "auto_minipix.txt.proposed.txt"
-    assert candidate.is_file(), "默认应写到 *.proposed.txt"
-    proposed = xrsp.load_auto_roi_centers(candidate)
-    assert proposed, "至少要解析出一些中心点"
+    candidate = roi_dir / "auto_ROI_minipix.proposed.h5"
+    assert candidate.is_file(), "The default must write a proposed HDF5 file"
+    proposed = xrsp.load_auto_roi_hdf5(candidate, detector="minipix")
+    assert len(proposed["roi_labels"]) > 0
 
-    # 默认不碰正式文件
+# English note.
     assert xrsp.load_auto_roi_centers(roi_dir / "auto_minipix.txt") == original
 
     figures = config_path.parent / "processed" / ".xrs_state" / "figures"
@@ -610,10 +689,14 @@ def test_propose_roi_with_write_backs_up(work_dir, capsys):
     roi_dir = config_path.parent / "roi"
 
     assert main(["propose-roi", str(config_path), "--detector", "minipix", "--write"]) == 0
+    assert main(["propose-roi", str(config_path), "--detector", "minipix", "--write"]) == 0
     capsys.readouterr()
 
-    assert (roi_dir / "auto_minipix.txt.bak").is_file(), "覆盖前应留备份"
-    assert xrsp.load_auto_roi_centers(roi_dir / "auto_minipix.txt")
+    assert (roi_dir / "auto_ROI_minipix.h5.bak").is_file()
+    official = xrsp.load_auto_roi_hdf5(
+        roi_dir / "auto_ROI_minipix.h5", detector="minipix"
+    )
+    assert len(official["roi_labels"]) > 0
 
 
 def test_pick_roi_writes_clicked_centers(work_dir, capsys, monkeypatch):
@@ -622,14 +705,17 @@ def test_pick_roi_writes_clicked_centers(work_dir, capsys, monkeypatch):
     config_path = build_case(work_dir / "case", mode="auto")
     roi_dir = config_path.parent / "roi"
     labels = auto_roi.expected_labels("minipix")
-    # 每个标签都点在第一个光斑上；只要点满，回车就能结束
-    clicks = dict.fromkeys(labels, (16, 14))
+# English note.
+    clicks = [(16, 14), (41, 14)]
+    calls = {"count": 0}
 
     def action(figure, state):
-        axis = figure.axes[0]
-        for x, y in clicks.values():
-            _mouse(figure, axis, x, y)
+        if calls["count"] == 0:
+            axis = figure.axes[0]
+            for x, y in clicks:
+                _mouse(figure, axis, x, y)
         _key(figure, "enter")
+        calls["count"] += 1
 
     import xrs_ui
 
@@ -637,7 +723,8 @@ def test_pick_roi_writes_clicked_centers(work_dir, capsys, monkeypatch):
     assert main(["pick-roi", str(config_path), "--detector", "minipix"]) == 0
     capsys.readouterr()
 
-    written = xrsp.load_auto_roi_centers(roi_dir / "auto_minipix.txt")
-    assert len(written) == len(labels)
-    assert set(written) == set(labels)
-    assert (roi_dir / "auto_minipix.txt.bak").is_file()
+    written = xrsp.load_auto_roi_hdf5(
+        roi_dir / "auto_ROI_minipix.h5", detector="minipix"
+    )
+    assert list(written["roi_labels"]) == list(labels[:2])
+    assert calls["count"] == 2

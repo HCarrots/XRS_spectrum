@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""XRS 光谱处理命令行入口。
+"""Command-line entry point for the staged XRS processing pipeline.
 
-刻意只依赖标准库 + 项目模块，**不需要 pixi**：在束线站的 Linux 桌面上
-用 conda 环境里的 ``python run_xrs.py config.yaml`` 即可。
+Usage::
 
-用法::
-
-    python run_xrs.py config.yaml                     # 从第一个未完成的阶段跑起
-    python run_xrs.py run config.yaml --stage sum     # 只跑某个阶段
-    python run_xrs.py run config.yaml --from xrs      # 从某个阶段往后跑
-    python run_xrs.py run config.yaml --no-ui         # 不交互，只用 YAML 里已填好的值
-    python run_xrs.py run config.yaml --force         # 忽略指纹，强制重算
-    python run_xrs.py check config.yaml               # 只体检，不动数据
+    python run_xrs.py config.yaml
+    python run_xrs.py run config.yaml --stage sum
+    python run_xrs.py run config.yaml --from xrs
+    python run_xrs.py run config.yaml --no-ui
+    python run_xrs.py run config.yaml --force
+    python run_xrs.py check config.yaml
     python run_xrs.py pick-roi config.yaml --detector lambda
     python run_xrs.py propose-roi config.yaml --detector lambda [--write]
 """
@@ -41,53 +38,53 @@ def log(message: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# 参数解析
+# Argument parsing
 # --------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run_xrs.py",
-        description="XRS 光谱处理：YAML 驱动、可分阶段反复运行。",
+        description="YAML-driven staged XRS spectrum processing.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run = subparsers.add_parser("run", help="运行一个或多个阶段")
-    run.add_argument("config", nargs="?", default="config.yaml", help="YAML 配置文件")
+    run = subparsers.add_parser("run", help="Run one or more stages")
+    run.add_argument("config", nargs="?", default="config.yaml", help="YAML configuration")
     group = run.add_mutually_exclusive_group()
-    group.add_argument("--stage", choices=STAGE_ORDER, help="只运行这一个阶段")
+    group.add_argument("--stage", choices=STAGE_ORDER, help="Run only this stage")
     group.add_argument("--from", dest="from_stage", choices=STAGE_ORDER,
-                       help="从这个阶段开始往后运行")
+                       help="Run this stage and every downstream stage")
     run.add_argument("--no-ui", action="store_true",
-                     help="不做任何交互（不弹窗、不提问），缺参数直接报错")
+                     help="Disable windows and prompts; report missing parameters")
     run.add_argument("--force", action="store_true",
-                     help="忽略参数指纹，强制重算所选阶段")
+                     help="Ignore fingerprints and recompute selected stages")
     run.add_argument("--overwrite", action="store_true",
-                     help="允许 save 阶段覆盖已存在的输出文件")
+                     help="Allow the save stage to overwrite output files")
 
-    check = subparsers.add_parser("check", help="检查参数完整性与各阶段状态")
+    check = subparsers.add_parser("check", help="Check configuration and stage status")
     check.add_argument("config", nargs="?", default="config.yaml")
 
-    pick = subparsers.add_parser("pick-roi", help="交互式点选 ROI 中心点")
+    pick = subparsers.add_parser("pick-roi", help="Interactively select and segment ROIs")
     pick.add_argument("config", nargs="?", default="config.yaml")
     pick.add_argument("--detector", choices=DETECTORS,
-                      help="只处理该探测器；默认两个都做")
+                      help="Process only this detector; default: both")
 
     propose = subparsers.add_parser(
-        "propose-roi", help="用峰值检测生成候选中心点（默认只写 *.proposed.txt）"
+        "propose-roi", help="Generate candidate HDF5 ROIs using peak detection"
     )
     propose.add_argument("config", nargs="?", default="config.yaml")
     propose.add_argument("--detector", choices=DETECTORS,
-                         help="只处理该探测器；默认两个都做")
+                         help="Process only this detector; default: both")
     propose.add_argument("--write", action="store_true",
-                         help="直接覆盖配置指定的中心点文件（默认只写候选文件）")
+                         help="Replace the configured HDF5 instead of writing a candidate")
 
     return parser
 
 
 def normalise_argv(argv: list[str]) -> list[str]:
-    """允许省略 ``run``：``run_xrs.py config.yaml`` 等价于 ``run config.yaml``。"""
+    """Allow omitting ``run`` before a configuration path."""
     if not argv:
         return ["run"]
     if argv[0] not in KNOWN_COMMANDS:
@@ -96,7 +93,7 @@ def normalise_argv(argv: list[str]) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# 子命令
+# Commands
 # --------------------------------------------------------------------------
 
 
@@ -114,14 +111,14 @@ def command_run(args) -> int:
     stages = select_stages(args)
 
     if args.no_ui:
-        # --no-ui 时先在门口把缺失参数报全，不要跑一半才炸
+        # Report every missing parameter before starting a headless run.
         blocked = []
         for stage in stages:
             problems = cfg.problems(stage)
             if problems:
                 blocked.append((stage, problems))
         if blocked:
-            log("--no-ui 模式下以下参数必须先在 config.yaml 里填好：")
+            log("The following parameters are required for --no-ui:")
             for stage, problems in blocked:
                 log(f"  [{stage}]")
                 for item in problems:
@@ -130,13 +127,13 @@ def command_run(args) -> int:
 
     for stage in stages:
         run_stage(cfg, stage, ui, log=log, force=args.force, overwrite=args.overwrite)
-    log(f"完成：{', '.join(stages)}")
+    log(f"Completed: {', '.join(stages)}")
     return 0
 
 
 def command_check(args) -> int:
     cfg = Config.load(args.config)
-    log(f"配置文件：{cfg.path}")
+    log(f"Configuration: {cfg.path}")
     log("")
 
     root_ok = not is_blank(cfg.get("data.root"))
@@ -146,31 +143,31 @@ def command_check(args) -> int:
     for stage in STAGE_ORDER:
         problems = cfg.problems(stage)
         if problems:
-            status = f"缺 {len(problems)} 项参数"
+            status = f"missing {len(problems)} parameter(s)"
             exit_code = 1
         elif store is None:
-            status = "参数齐全（data.root 未填，无法判断缓存）"
+            status = "ready (cache unavailable because data.root is empty)"
         elif store.is_current(stage, cfg.fingerprint(stage)):
-            status = "参数齐全，缓存有效（会跳过）"
+            status = "ready; cache is current"
         elif store.stage_info(stage):
-            status = "参数已变更，需要重跑"
+            status = "parameters changed; rerun required"
         else:
-            status = "参数齐全，尚未运行"
+            status = "ready; not yet run"
         log(f"[{stage}] {STAGE_TITLE[stage]}")
-        log(f"    状态：{status}")
+        log(f"    Status: {status}")
         for item in problems:
             log(f"    - {item}")
 
     log("")
     only_pixi, only_env = environment_parity(cfg.path.parent)
     if only_pixi or only_env:
-        log("环境清单不一致（pixi.toml vs environment.yml）：")
+        log("Environment manifests differ (pixi.toml vs environment.yml):")
         if only_pixi:
-            log(f"    只在 pixi.toml 里：{only_pixi}")
+            log(f"    Only in pixi.toml: {only_pixi}")
         if only_env:
-            log(f"    只在 environment.yml 里：{only_env}")
+            log(f"    Only in environment.yml: {only_env}")
     else:
-        log("环境清单一致（pixi.toml 与 environment.yml）。")
+        log("Environment manifests match.")
     return exit_code
 
 
@@ -188,7 +185,7 @@ def command_rebuild_centers(args) -> int:
 
 
 # --------------------------------------------------------------------------
-# 入口
+# Entry point
 # --------------------------------------------------------------------------
 
 
@@ -207,21 +204,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "propose-roi":
             return command_rebuild_centers(args)
     except ConfigError as exc:
-        log(f"\n[配置错误] {exc}")
+        log(f"\n[CONFIG ERROR] {exc}")
         return 1
     except UiRequired as exc:
-        log(f"\n[需要交互] {exc}")
+        log(f"\n[INTERACTION REQUIRED] {exc}")
         return 2
     except UiCancelled as exc:
-        log(f"\n[已取消] {exc}")
+        log(f"\n[CANCELLED] {exc}")
         return 130
     except KeyboardInterrupt:
-        log("\n[中断] 用户按了 Ctrl-C")
+        log("\n[INTERRUPTED] Ctrl-C")
         return 130
     except FileNotFoundError as exc:
-        log(f"\n[找不到文件] {exc}")
+        log(f"\n[FILE NOT FOUND] {exc}")
         return 1
-    log(f"未处理的命令：{args.command}")
+    log(f"Unhandled command: {args.command}")
     return 1
 
 

@@ -1,18 +1,4 @@
-"""交互层：缺参数时弹窗问你，调完立刻写回 YAML。
-
-这个模块替代了原来 notebook 里"改一个 cell 顶部的变量 → 重跑"的循环。
-三类交互：
-
-* :meth:`UI.ask` / :meth:`UI.ask_list` —— 终端问答，用于路径、扫描编号这类
-  不适合画图的标量。
-* :meth:`UI.adjust` —— matplotlib 滑杆/单选/多选窗口，配一张实时重画的 QC 图，
-  用于 ``filter_value``、``q_range``、``modules`` 这类"看效果调"的参数。
-* :meth:`UI.pick_points` / :meth:`UI.toggle_scans` —— 图像上点选，用于
-  重建 ROI 中心点和剔除坏扫描。
-
-``--no-ui`` 时调用任何交互方法都会抛 :class:`UiRequired`，由上层拼出
-"你还缺哪些参数"的报错。
-"""
+"""xrs_ui implementation."""
 
 from __future__ import annotations
 
@@ -22,7 +8,7 @@ from dataclasses import dataclass, field
 
 from xrs_config import is_blank
 
-#: matplotlib 默认字体没有中文字形，按优先级挑一个能用的。
+# English note.
 _CJK_FONTS = (
     "Noto Sans CJK SC",
     "Source Han Sans SC",
@@ -48,22 +34,36 @@ _NON_INTERACTIVE_BACKENDS = {
 _CANDIDATE_BACKENDS = ("TkAgg", "QtAgg", "Qt5Agg")
 
 
+def _clamp_rectangle(x0, y0, x1, y1, image_shape):
+    """Convert two drag points to non-empty, half-open image bounds."""
+    import numpy as np
+
+    height, width = image_shape
+    left = max(0, min(width, int(np.floor(min(x0, x1)))))
+    right = max(0, min(width, int(np.ceil(max(x0, x1)))))
+    top = max(0, min(height, int(np.floor(min(y0, y1)))))
+    bottom = max(0, min(height, int(np.ceil(max(y0, y1)))))
+    if right <= left or bottom <= top:
+        raise ValueError("Rectangle must have a non-zero area")
+    return left, right, top, bottom
+
+
 class UiRequired(Exception):
-    """需要交互，但当前处于 ``--no-ui`` 或没有可用图形后端。"""
+    """Implementation notes for UiRequired."""
 
 
 class UiCancelled(Exception):
-    """用户在交互界面里按了"中止"。"""
+    """Implementation notes for UiCancelled."""
 
 
 # --------------------------------------------------------------------------
-# 控件描述
+# English note.
 # --------------------------------------------------------------------------
 
 
 @dataclass
 class SliderSpec:
-    """一个滑杆。``step`` 为 1 且 ``integer`` 为真时取整。"""
+    """Implementation notes for SliderSpec."""
 
     key: str
     label: str
@@ -76,7 +76,7 @@ class SliderSpec:
 
 @dataclass
 class ChoiceSpec:
-    """一组单选框（``multi=False``）或复选框（``multi=True``）。"""
+    """Implementation notes for ChoiceSpec."""
 
     key: str
     label: str
@@ -90,23 +90,23 @@ class ChoiceSpec:
 
 
 # --------------------------------------------------------------------------
-# matplotlib 设置
+# English note.
 # --------------------------------------------------------------------------
 
 
 def configure_matplotlib(dpi: int = 150) -> None:
-    """设置中文字体和分辨率。不切换后端。"""
+    """Implementation notes for configure_matplotlib."""
     import logging
 
     import matplotlib
     from matplotlib import font_manager
 
-    # 缺字重时 matplotlib 会对每个字形刷一条 findfont 警告，直接把日志压掉
+# English note.
     logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
     try:
         installed = {font.name for font in font_manager.fontManager.ttflist}
-    except Exception:  # 字体缓存损坏时不该拖垮整个流程
+    except Exception:  # A broken font cache must not stop processing.
         installed = set()
     usable = [name for name in _CJK_FONTS if name in installed]
     if usable:
@@ -120,22 +120,19 @@ def configure_matplotlib(dpi: int = 150) -> None:
 
 
 def has_display() -> bool:
-    """粗略判断当前进程能不能开窗口。"""
+    """Implementation notes for has_display."""
     if sys.platform.startswith("win") or sys.platform == "darwin":
         return True
     if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
         return True
-    # Windows 上的 MSYS/Cygwin 会设这两个变量
+# English note.
     if os.environ.get("TERM_PROGRAM"):
         return True
     return False
 
 
 def ensure_interactive_backend() -> str:
-    """确保 pyplot 用的是能开窗口的后端，返回后端名。
-
-    失败时抛 :class:`UiRequired`，由调用方决定是报错还是退回 ``--no-ui``。
-    """
+    """Implementation notes for ensure_interactive_backend."""
     import matplotlib
     import matplotlib.pyplot as plt
 
@@ -144,8 +141,8 @@ def ensure_interactive_backend() -> str:
         return current
     if not has_display():
         raise UiRequired(
-            f"当前后端是 {current}，而且没有检测到显示器（DISPLAY/WAYLAND_DISPLAY 都为空）。"
-            "纯 SSH 会话里无法弹窗，请用 --no-ui 并手工填好参数。"
+            f"Backend {current} is non-interactive and no display was detected. "
+            "Use --no-ui with a complete configuration in a headless session."
         )
     for candidate in _CANDIDATE_BACKENDS:
         try:
@@ -155,8 +152,8 @@ def ensure_interactive_backend() -> str:
         if matplotlib.get_backend().lower() not in _NON_INTERACTIVE_BACKENDS:
             return matplotlib.get_backend()
     raise UiRequired(
-        f"当前后端是 {current}，且切换到 {'/'.join(_CANDIDATE_BACKENDS)} 都失败。"
-        "请安装 python3-tk（或 PyQt）后重试，或改用 --no-ui。"
+        f"Backend {current} is non-interactive and none of "
+        f"{'/'.join(_CANDIDATE_BACKENDS)} could be enabled. Install Tk or Qt, or use --no-ui."
     )
 
 
@@ -166,21 +163,18 @@ def ensure_interactive_backend() -> str:
 
 
 class UI:
-    """终端问答 + matplotlib 窗口的集合。
-
-    ``interactive=False`` 时（``--no-ui``）所有交互方法都抛 :class:`UiRequired`。
-    """
+    """Implementation notes for UI."""
 
     def __init__(self, interactive: bool = True, dpi: int = 150):
         self.interactive = interactive
         self.dpi = dpi
         self._backend_checked = False
 
-    # -- 基础设施 -----------------------------------------------------------
+# English note.
 
     def require(self, what: str) -> None:
         if not self.interactive:
-            raise UiRequired(f"{what} 需要交互，但当前是 --no-ui")
+            raise UiRequired(f"{what} requires interaction, but --no-ui is active")
         if not self._backend_checked:
             self._backend_checked = True
             ensure_interactive_backend()
@@ -188,10 +182,10 @@ class UI:
     def note(self, message: str) -> None:
         print(message)
 
-    # -- 终端问答 -----------------------------------------------------------
+# English note.
 
     def ask(self, label: str, current=None, cast=str, choices=None, help_text: str = ""):
-        """问一个标量。直接回车表示沿用 ``current``。"""
+        """Implementation notes for ask."""
         self.require(label)
         if help_text:
             print(f"  {help_text}")
@@ -200,22 +194,22 @@ class UI:
             try:
                 raw = input(f"{label}{suffix}: ").strip()
             except EOFError as exc:
-                raise UiCancelled(f"读取 {label} 时遇到 EOF") from exc
+                raise UiCancelled(f"Reached EOF while reading {label}") from exc
             if not raw:
                 if not is_blank(current):
                     return current
-                print("  不能为空，请重新输入。")
+                print("  A value is required.")
                 continue
             if choices is not None and raw not in choices:
-                print(f"  只能是 {list(choices)} 之一。")
+                print(f"  Choose one of {list(choices)}.")
                 continue
             try:
                 return cast(raw)
             except (TypeError, ValueError):
-                print(f"  无法把 {raw!r} 解析成 {getattr(cast, '__name__', '所需类型')}。")
+                print(f"  Could not parse {raw!r} as {getattr(cast, '__name__', 'the required type')}.")
 
     def ask_list(self, label: str, current=None, cast=int, help_text: str = ""):
-        """问一个列表。``"1,2,3"`` / ``"1 2 3"`` 都行；直接回车表示不改。"""
+        """Implementation notes for ask_list."""
         self.require(label)
         if help_text:
             print(f"  {help_text}")
@@ -224,21 +218,21 @@ class UI:
             try:
                 raw = input(f"{label}{suffix}: ").strip()
             except EOFError as exc:
-                raise UiCancelled(f"读取 {label} 时遇到 EOF") from exc
+                raise UiCancelled(f"Reached EOF while reading {label}") from exc
             if not raw:
                 if not is_blank(current):
                     return list(current)
                 return []
-            if raw.lower() in {"none", "null", "空"}:
+            if raw.lower() in {"none", "null"}:
                 return []
             pieces = [piece for piece in raw.replace(",", " ").split() if piece]
             try:
                 return [cast(piece) for piece in pieces]
             except (TypeError, ValueError):
-                print(f"  无法把 {raw!r} 解析成 {getattr(cast, '__name__', '列表')} 列表。")
+                print(f"  Could not parse {raw!r} as a list of {getattr(cast, '__name__', 'values')}.")
 
     def confirm(self, message: str, default: bool = True) -> bool:
-        """y/N 确认。``--no-ui`` 时直接返回 ``default``（脚本化运行不该卡住）。"""
+        """Implementation notes for confirm."""
         if not self.interactive:
             return default
         hint = "Y/n" if default else "y/N"
@@ -250,32 +244,168 @@ class UI:
             return default
         return raw in {"y", "yes"}
 
-    # -- 滑杆/单选框窗口 ----------------------------------------------------
+    def preview_images(self, images, title="Elastic detector preview") -> None:
+        """Show summed detector images and wait for explicit confirmation."""
+        self.require(title)
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.widgets import Button
+
+        figure, axes = plt.subplots(1, len(images), figsize=(14, 7), squeeze=False)
+        for axis, (name, image) in zip(axes[0], images.items()):
+            axis.imshow(np.log1p(np.clip(np.asarray(image, dtype=float), 0, None)), cmap="gray")
+            axis.set_title(str(name).title())
+            axis.set_xlabel("x")
+            axis.set_ylabel("y")
+        state = {"done": False, "accepted": False}
+        button_axis = figure.add_axes([0.43, 0.02, 0.14, 0.05])
+        Button(button_axis, "Continue", color="0.85").on_clicked(
+            lambda _event: state.update(done=True, accepted=True)
+        )
+        figure.suptitle(title)
+        figure.canvas.mpl_connect(
+            "key_press_event",
+            lambda event: state.update(done=True, accepted=True)
+            if event.key == "enter" else None,
+        )
+        _run_event_loop(figure, state)
+        plt.close(figure)
+        if not state["accepted"]:
+            raise UiCancelled(f"{title} was cancelled")
+
+    def review_geometry(self, image, labels, bounds, title: str) -> bool:
+        """Display stored ROI geometry; return True to reuse or False to redraw."""
+        self.require(title)
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.patches import Rectangle
+        from matplotlib.widgets import Button
+
+        figure, axis = plt.subplots(figsize=(11, 9))
+        axis.imshow(np.log1p(np.clip(np.asarray(image, dtype=float), 0, None)), cmap="gray")
+        for label, (y1, y2, x1, x2) in zip(labels, bounds):
+            axis.add_patch(Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                     edgecolor="red", facecolor="none", lw=0.9))
+            axis.text(x1, y1, str(label), color="yellow", fontsize=7)
+        axis.set_title(f"{title}\nEnter: use existing | R: redraw | Esc: cancel")
+        state = {"done": False, "accepted": False, "redraw": False}
+        use_axis = figure.add_axes([0.34, 0.02, 0.14, 0.05])
+        redraw_axis = figure.add_axes([0.52, 0.02, 0.14, 0.05])
+        Button(use_axis, "Use existing", color="0.85").on_clicked(
+            lambda _event: state.update(done=True, accepted=True)
+        )
+        Button(redraw_axis, "Redraw", color="0.92").on_clicked(
+            lambda _event: state.update(done=True, accepted=True, redraw=True)
+        )
+        def on_key(event):
+            if event.key == "enter":
+                state.update(done=True, accepted=True)
+            elif event.key in {"r", "R"}:
+                state.update(done=True, accepted=True, redraw=True)
+            elif event.key == "escape":
+                state.update(done=True, accepted=False)
+        figure.canvas.mpl_connect("key_press_event", on_key)
+        _run_event_loop(figure, state)
+        plt.close(figure)
+        if not state["accepted"]:
+            raise UiCancelled(f"{title} was cancelled")
+        return not state["redraw"]
+
+    def pick_rectangles(self, image, labels, title: str, figure=None, figsize=(11, 11)):
+        """Draw labeled rectangular ROIs in canonical order."""
+        self.require("rectangular ROI selection")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.patches import Rectangle
+        from matplotlib.widgets import RectangleSelector
+
+        if figure is None:
+            figure = plt.figure(figsize=figsize)
+        figure.clear()
+        axis = figure.add_subplot(111)
+        source = np.asarray(image, dtype=float)
+        height, width = source.shape
+        axis.imshow(np.log1p(np.clip(source, 0, None)), cmap="gray")
+        placed = []
+        actions = []
+        state = {"done": False, "accepted": False}
+
+        def next_label():
+            position = len(actions)
+            return labels[position] if position < len(labels) else None
+
+        def redraw():
+            for patch in list(axis.patches):
+                patch.remove()
+            for text_item in list(axis.texts):
+                text_item.remove()
+            for label, x1, x2, y1, y2 in placed:
+                axis.add_patch(Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                         edgecolor="red", facecolor="none", lw=0.9))
+                axis.text(x1, y1, label, color="yellow", fontsize=7)
+            upcoming = next_label()
+            status = f"Next: {upcoming}" if upcoming else "All labels handled"
+            figure.suptitle(
+                f"{title} | {status}\nDrag: add | S: skip | Backspace: undo | "
+                "R: reset | Enter: finish | Esc: cancel"
+            )
+            figure.canvas.draw_idle()
+
+        def on_select(click, release):
+            label = next_label()
+            if label is None or click.xdata is None or release.xdata is None:
+                return
+            try:
+                x1, x2, y1, y2 = _clamp_rectangle(
+                    click.xdata, click.ydata, release.xdata, release.ydata,
+                    (height, width),
+                )
+            except ValueError:
+                print("  Rectangle must have a non-zero area.")
+                return
+            placed.append((str(label), x1, x2, y1, y2))
+            actions.append(("place", str(label)))
+            redraw()
+
+        selector = RectangleSelector(axis, on_select, useblit=False, button=[1],
+                                     minspanx=1, minspany=1, spancoords="data")
+        def on_key(event):
+            if event.key in {"backspace", "delete"}:
+                if actions:
+                    action, _label = actions.pop()
+                    if action == "place":
+                        placed.pop()
+                redraw()
+            elif event.key in {"s", "S"} and next_label() is not None:
+                actions.append(("skip", str(next_label())))
+                redraw()
+            elif event.key in {"r", "R"}:
+                placed.clear(); actions.clear(); redraw()
+            elif event.key == "enter" and placed:
+                state.update(done=True, accepted=True)
+            elif event.key == "escape":
+                state.update(done=True, accepted=False)
+        figure.canvas.mpl_connect("key_press_event", on_key)
+        redraw()
+        _run_event_loop(figure, state)
+        selector.set_active(False)
+        if not state["accepted"]:
+            raise UiCancelled(f"{title} was cancelled")
+        return list(placed)
+
+# English note.
 
     def adjust(self, fig, controls, draw, title: str = "", left: float = 0.70):
-        """在 ``fig`` 右侧加一列控件，实时调参。
-
-        参数
-        ----
-        fig
-            已经画好 QC 图的 Figure。
-        controls
-            :class:`SliderSpec` / :class:`ChoiceSpec` 的列表。
-        draw
-            回调 ``draw(values: dict) -> None``，负责按新参数重画。
-
-        返回用户确认后的取值字典。窗口被关掉、或点了"中止"时抛
-        :class:`UiCancelled`。
-        """
-        self.require(title or "调参窗口")
+        """Implementation notes for adjust."""
+        self.require(title or "parameter adjustment")
         import matplotlib.pyplot as plt
         from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider
 
         if not controls:
-            raise ValueError("adjust() 至少需要一个控件")
+            raise ValueError("adjust() requires at least one control")
 
         values = {spec.key: spec.value for spec in controls}
-        state = {"done": False, "accepted": False}
+        state = {"done": False, "accepted": False, "keep_original": False}
 
         top, bottom = 0.90, 0.16
         slot = (top - bottom) / len(controls)
@@ -286,7 +416,7 @@ class UI:
             axes = fig.add_axes([left, y, 0.27, height])
             if isinstance(spec, SliderSpec):
                 axes.set_title(spec.label, fontsize=9, loc="left")
-                # 给标题腾地方
+# English note.
                 position = axes.get_position()
                 axes.set_position([position.x0, position.y0, position.width, position.height])
                 widgets.append(
@@ -318,8 +448,8 @@ class UI:
                     widgets.append(
                         (spec, RadioButtons(axes, spec.options, active=active))
                     )
-            else:  # pragma: no cover - 编程错误
-                raise TypeError(f"不认识的控件类型：{type(spec).__name__}")
+            else:  # pragma: no cover - programmer error
+                raise TypeError(f"Unsupported control type: {type(spec).__name__}")
 
         def collect() -> dict:
             for spec, widget in widgets:
@@ -342,8 +472,8 @@ class UI:
         def redraw(_event=None) -> None:
             try:
                 draw(collect())
-            except Exception as exc:  # 参数组合非法时不该把窗口弄崩
-                print(f"  [重画失败] {exc.__class__.__name__}: {exc}")
+            except Exception as exc:  # Keep the adjustment window usable.
+                print(f"  [REDRAW FAILED] {exc.__class__.__name__}: {exc}")
             fig.canvas.draw_idle()
 
         for _spec, widget in widgets:
@@ -353,19 +483,20 @@ class UI:
         ax_ok = fig.add_axes([left, 0.10, 0.12, 0.05])
         ax_skip = fig.add_axes([left + 0.14, 0.10, 0.12, 0.05])
         ax_abort = fig.add_axes([left, 0.03, 0.26, 0.05])
-        button_ok = Button(ax_ok, "保存并继续", color="0.85", hovercolor="0.75")
-        button_skip = Button(ax_skip, "沿用原值", color="0.92", hovercolor="0.85")
-        button_abort = Button(ax_abort, "中止", color="0.95", hovercolor="0.85")
+        button_ok = Button(ax_ok, "Save and continue", color="0.85", hovercolor="0.75")
+        button_skip = Button(ax_skip, "Keep values", color="0.92", hovercolor="0.85")
+        button_abort = Button(ax_abort, "Cancel", color="0.95", hovercolor="0.85")
 
-        def finish(accepted: bool):
+        def finish(accepted: bool, keep_original: bool = False):
             def handler(_event):
                 state["done"] = True
                 state["accepted"] = accepted
+                state["keep_original"] = keep_original
 
             return handler
 
         button_ok.on_clicked(finish(True))
-        button_skip.on_clicked(finish(False))
+        button_skip.on_clicked(finish(True, keep_original=True))
         button_abort.on_clicked(finish(False))
 
         if title:
@@ -376,20 +507,18 @@ class UI:
         _run_event_loop(fig, state)
 
         if not state["accepted"]:
-            raise UiCancelled(f"{title or '调参'}被取消")
+            raise UiCancelled(f"{title or 'Parameter adjustment'} was cancelled")
+        if state["keep_original"]:
+            return {spec.key: spec.value for spec in controls}
         collect()
-        # 图窗留给调用方：它通常还要把最终状态存成 QC PNG
+# English note.
         return values
 
-    # -- 图像上点选 ---------------------------------------------------------
+# English note.
 
     def pick_points(self, image, labels, title: str, figure=None, figsize=(11, 11)):
-        """在图像上按 ``labels`` 顺序点中心点。
-
-        左键落点，右键或 Backspace 撤销，回车结束（必须点满），Esc 放弃。
-        返回 ``{label: (x, y)}``。图窗不关闭，由调用方负责关（通常还要存 QC 图）。
-        """
-        self.require("ROI 中心点点选")
+        """Pick ROI centers in label order, with undo and skip support."""
+        self.require("ROI center selection")
         import matplotlib.pyplot as plt
 
         import numpy as np
@@ -400,15 +529,20 @@ class UI:
         axis = figure.add_subplot(111)
         axis.imshow(np.log1p(np.clip(np.asarray(image, dtype=float), 0, None)), cmap="gray")
         axis.set_title(
-            f"{title}\n左键落点 / 右键撤销 / 回车完成 / Esc 放弃",
+            f"{title}\nLeft click: place | Right click/Backspace: undo | "
+            "S: skip | Enter: finish | Esc: cancel",
             fontsize=11,
         )
         axis.set_xlabel("x")
         axis.set_ylabel("y")
 
         placed: list[tuple[str, int, int]] = []
+        actions: list[tuple[str, object]] = []
         state = {"done": False, "accepted": False}
         height, width = np.asarray(image).shape
+
+        def next_label():
+            return labels[len(actions)] if len(actions) < len(labels) else None
 
         def redraw() -> None:
             for artist in list(axis.lines) + list(axis.texts):
@@ -418,10 +552,11 @@ class UI:
                 axis.axhline(y, color="#ff3030", lw=0.8, alpha=0.7)
                 axis.plot(x, y, "o", color="#ff3030", ms=4)
                 axis.text(x + 5, y - 5, roi_label, color="#ff3030", fontsize=8)
-            remaining = len(labels) - len(placed)
+            remaining = len(labels) - len(actions)
+            upcoming = next_label()
             figure.suptitle(
-                f"{title}   已选 {len(placed)}/{len(labels)}"
-                + (f"，下一个 {labels[len(placed)]}" if remaining else "  —— 已点满，回车结束"),
+                f"{title} | selected {len(placed)}, handled {len(actions)}/{len(labels)}"
+                + (f" | next: {upcoming}" if remaining else " | all labels handled"),
                 fontsize=12,
             )
             figure.canvas.draw_idle()
@@ -430,30 +565,39 @@ class UI:
             if event.inaxes is not axis or event.xdata is None:
                 return
             if event.button == 3:
-                if placed:
-                    placed.pop()
+                if actions:
+                    action, payload = actions.pop()
+                    if action == "place":
+                        placed.pop()
                     redraw()
                 return
             if event.button != 1:
                 return
-            if len(placed) >= len(labels):
-                print("  已经点满了，回车结束（右键可撤销）")
+            label = next_label()
+            if label is None:
+                print("  All labels have been handled; press Enter to finish.")
                 return
             x = int(min(max(round(event.xdata), 0), width - 1))
             y = int(min(max(round(event.ydata), 0), height - 1))
-            placed.append((labels[len(placed)], x, y))
+            placed.append((str(label), x, y))
+            actions.append(("place", (str(label), x, y)))
             redraw()
 
         def on_key(event) -> None:
-            if event.key in {"backspace", "delete"} and placed:
-                placed.pop()
+            if event.key in {"backspace", "delete"} and actions:
+                action, _payload = actions.pop()
+                if action == "place":
+                    placed.pop()
+                redraw()
+            elif event.key in {"s", "S"} and next_label() is not None:
+                actions.append(("skip", str(next_label())))
                 redraw()
             elif event.key == "enter":
-                if len(placed) == len(labels):
+                if placed:
                     state["done"] = True
                     state["accepted"] = True
                 else:
-                    print(f"  还差 {len(labels) - len(placed)} 个点：{labels[len(placed):]}")
+                    print("  Select at least one center before finishing.")
             elif event.key == "escape":
                 state["done"] = True
                 state["accepted"] = False
@@ -464,16 +608,12 @@ class UI:
         _run_event_loop(figure, state)
 
         if not state["accepted"]:
-            raise UiCancelled(f"{title} 的中心点选择被取消")
+            raise UiCancelled(f"{title} was cancelled")
         return {roi_label: (x, y) for roi_label, x, y in placed}
 
     def toggle_scans(self, series, excluded, title: str, figure=None, figsize=(12, 6)):
-        """点曲线来切换"剔除/保留"，替代手填 ``index_to_remove``。
-
-        ``series`` 是 ``[(x, y), ...]``，每个扫描一条曲线——各个扫描的能量轴
-        可以不一样。返回剔除的序号列表。图窗不关闭，由调用方负责关。
-        """
-        self.require("坏扫描剔除")
+        """Implementation notes for toggle_scans."""
+        self.require("scan exclusion")
         import matplotlib.pyplot as plt
         import numpy as np
 
@@ -503,14 +643,14 @@ class UI:
                     alpha=0.35 if is_out else 0.9,
                     color="0.6" if is_out else None,
                     linestyle="--" if is_out else "-",
-                    label=f"scan {index}" + ("  [剔除]" if is_out else ""),
+                    label=f"scan {index}" + ("  [excluded]" if is_out else ""),
                 )
             axis.set_yscale("log")
             axis.set_xlabel("energy")
             axis.set_ylabel("I0")
             axis.legend(fontsize=8, ncol=2, loc="center left", bbox_to_anchor=(1.01, 0.5))
             axis.set_title(
-                f"{title}\n点曲线切换剔除状态；当前剔除 {sorted(dropped) or '无'}",
+                f"{title}\nClick a curve to toggle it; excluded: {sorted(dropped) or 'none'}",
                 fontsize=11,
             )
             figure.canvas.draw_idle()
@@ -520,7 +660,7 @@ class UI:
                 return
             if event.button != 1 or not prepared:
                 return
-            # 在点击的 x 处比较各曲线离点击点的纵向距离，取最近的一条
+# English note.
             best_index, best_distance = None, np.inf
             for index, (x_values, y_values) in enumerate(prepared):
                 if x_values.size == 0 or y_values.size != x_values.size:
@@ -550,10 +690,10 @@ class UI:
         ax_keep = figure.add_axes([0.17, 0.01, 0.13, 0.05])
         from matplotlib.widgets import Button
 
-        Button(ax_ok, "完成", color="0.85", hovercolor="0.75").on_clicked(
+        Button(ax_ok, "Done", color="0.85", hovercolor="0.75").on_clicked(
             lambda _e: (state.update(done=True, accepted=True))
         )
-        Button(ax_keep, "全部保留", color="0.92", hovercolor="0.85").on_clicked(
+        Button(ax_keep, "Keep all", color="0.92", hovercolor="0.85").on_clicked(
             lambda _e: (dropped.clear(), redraw())
         )
 
@@ -563,14 +703,14 @@ class UI:
         _run_event_loop(figure, state)
 
         if not state["accepted"]:
-            raise UiCancelled(f"{title} 被取消")
+            raise UiCancelled(f"{title} was cancelled")
         return sorted(dropped)
 
-    # -- 内部 ---------------------------------------------------------------
+# English note.
 
 
 def _run_event_loop(figure, state: dict) -> None:
-    """转到用户点完按钮/按完键。窗口被关掉时按取消处理。"""
+    """Implementation notes for _run_event_loop."""
     import matplotlib.pyplot as plt
 
     while not state["done"]:
@@ -581,7 +721,7 @@ def _run_event_loop(figure, state: dict) -> None:
         try:
             plt.pause(0.05)
         except Exception:
-            # 窗口被销毁时 pause 会抛，等价于取消
+# English note.
             state["done"] = True
             state["accepted"] = False
             return

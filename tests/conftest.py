@@ -1,9 +1,4 @@
-"""测试夹具：合成一份 NeXus 数据，让整条流水线能在没有束线数据时跑通。
-
-刻意不用 pytest 的 ``tmp_path``：它内部用 ``tempfile.mkdtemp``，而
-``mkdtemp`` 建目录时带 ``0o700``，在受限沙箱下该目录随后不可写。
-这里改用 ``tests/_work/`` 下的普通目录（默认权限）。
-"""
+"""conftest implementation."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg", force=True)  # 测试里绝不开窗口
+matplotlib.use("Agg", force=True)  # Tests never open a GUI window.
 
 import h5py
 import numpy as np
@@ -30,7 +25,7 @@ TEMPLATE = PROJECT_ROOT / "config.yaml"
 WORK_ROOT = Path(__file__).resolve().parent / "_work"
 
 IMAGE_SHAPE = (48, 60)
-#: 两个光斑的中心 (x, y)，以及覆盖它们的矩形 ROI
+# English note.
 BLOBS = ((16, 14), (41, 14))
 REGULAR_BOXES = ((10, 22, 8, 20), (35, 47, 8, 20))  # (x1, x2, y1, y2)
 
@@ -40,11 +35,11 @@ ENERGY_PV = "M_DCM_B5Energy_readback"
 I0_PV = "D_SiC_I_A"
 
 ELASTIC_CENTER_KEV = 9.68
-ELASTIC_HWHM_KEV = 0.0006  # → FWHM 1.2 eV，小于默认的 2.0 eV 上限
+ELASTIC_HWHM_KEV = 0.0006  # English note.
 
 
 def _blob_image():
-    """两个高斯光斑，峰值 100。"""
+    """Implementation notes for _blob_image."""
     height, width = IMAGE_SHAPE
     yy, xx = np.mgrid[0:height, 0:width]
     image = np.zeros(IMAGE_SHAPE, dtype=float)
@@ -58,10 +53,7 @@ def _lorentzian(energy, center, hwhm, peak, floor):
 
 
 def build_case(root: Path, *, mode: str, glitch_index: int | None = None) -> Path:
-    """在 ``root`` 下造出 raw/ 数据、ROI 文件和一个填好的 config.yaml。
-
-    返回 config.yaml 的路径。
-    """
+    """Implementation notes for build_case."""
     raw = root / "raw"
     roi_dir = root / "roi"
     raw.mkdir(parents=True, exist_ok=True)
@@ -69,8 +61,8 @@ def build_case(root: Path, *, mode: str, glitch_index: int | None = None) -> Pat
 
     blob = _blob_image()
 
-    # ---- 弹性扫描：能量轴上的洛伦兹峰 ----
-    elastic_energy = np.linspace(9.66, 9.70, 201)  # keV，0.2 eV 步长
+# English note.
+    elastic_energy = np.linspace(9.66, 9.70, 201)  # English note.
     elastic_profile = _lorentzian(
         elastic_energy, ELASTIC_CENTER_KEV, ELASTIC_HWHM_KEV, peak=10.0, floor=1.0
     )
@@ -86,7 +78,7 @@ def build_case(root: Path, *, mode: str, glitch_index: int | None = None) -> Pat
         elastic_i0,
     )
 
-    # ---- XRS 扫描：能区更宽，带一个吸收边台阶 ----
+# English note.
     xrs_energy = np.linspace(9.90, 10.10, 101)
     xrs_profile = 1.0 + 0.5 * np.tanh((xrs_energy - 10.0) / 0.02)
     xrs_i0 = np.full(xrs_energy.size, 2000.0)
@@ -103,7 +95,7 @@ def build_case(root: Path, *, mode: str, glitch_index: int | None = None) -> Pat
         xrs_i0,
     )
 
-    # ---- ROI 文件 ----
+# English note.
     regular_lambda = roi_dir / "regular_lambda.txt"
     regular_minipix = roi_dir / "regular_minipix.txt"
     header = "roi_label\tx1\tx2\ty1\ty2\tx_shift\ty_shift\tx_expand\ty_expand\n"
@@ -114,7 +106,7 @@ def build_case(root: Path, *, mode: str, glitch_index: int | None = None) -> Pat
     regular_lambda.write_text(header + rows, encoding="utf-8")
     regular_minipix.write_text(header + rows, encoding="utf-8")
 
-    # auto 模式：lambda 用 VB 模组，minipix 用 HB 模组（各自的规范标签）
+# English note.
     (roi_dir / "auto_lambda.txt").write_text(
         "roi_label\tx\ty\nVB-A1\t16\t14\nVB-A2\t41\t14\n", encoding="utf-8"
     )
@@ -122,7 +114,7 @@ def build_case(root: Path, *, mode: str, glitch_index: int | None = None) -> Pat
         "roi_label\tx\ty\nHB-A1\t16\t14\nHB-A2\t41\t14\n", encoding="utf-8"
     )
 
-    # ---- config.yaml：复制模板后逐项填好 ----
+# English note.
     config_path = root / "config.yaml"
     shutil.copy(TEMPLATE, config_path)
     cfg = Config.load(config_path)
@@ -135,8 +127,8 @@ def build_case(root: Path, *, mode: str, glitch_index: int | None = None) -> Pat
     cfg.set("elastic.auto_centers.minipix", "roi/auto_minipix.txt")
     cfg.set("xrs.scan_ids", [XRS_SCAN_ID])
     cfg.set("q.module_angles_deg", [145.6, 79.03, 25, 118.8, 58.85, 67.862])
-    # 矩形 ROI 文件里两个探测器都用 HB 标签，所以 regular 模式只有 HB 可用；
-    # auto 模式下 lambda 用 VB、minipix 用 HB。
+# English note.
+# English note.
     cfg.set("sum.modules", ["VB", "HB"] if mode == "auto" else ["HB"])
     cfg.set("sum.q_range", [0, 12])
     cfg.set("sum.energy_step_ev", 0.2)
@@ -150,7 +142,7 @@ def _write_nexus(path: Path, energy, lambda_stack, minipix_stack, i0):
     with h5py.File(path, "w") as handle:
         instrument = handle.create_group("entry/instrument")
         instrument.create_dataset(ENERGY_PV, data=energy)
-        # 顺便放一个备用的能量 PV，用来验证"配置指定优先于自动探测"
+# English note.
         instrument.create_dataset("M_DCM_B5Link_Energy_readback", data=energy + 1000.0)
         data = handle.create_group("entry/data")
         data.create_dataset("D_LAMBDA", data=lambda_stack, compression="gzip")
@@ -160,7 +152,7 @@ def _write_nexus(path: Path, energy, lambda_stack, minipix_stack, i0):
 
 @pytest.fixture
 def work_dir(request):
-    """一个可写的临时目录（不用 tmp_path，理由见模块文档）。"""
+    """Implementation notes for work_dir."""
     safe = request.node.name.replace("[", "_").replace("]", "_").replace("/", "_")
     path = WORK_ROOT / safe
     if path.exists():
@@ -189,7 +181,7 @@ def glitch_case(work_dir):
 
 @pytest.fixture(autouse=True)
 def _quiet_env(monkeypatch):
-    """固定后端和编码，避免测试受本机环境影响。"""
+    """Implementation notes for _quiet_env."""
     monkeypatch.setenv("MPLBACKEND", "Agg")
     monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
     yield

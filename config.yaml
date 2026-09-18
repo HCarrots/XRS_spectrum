@@ -1,120 +1,90 @@
 # ============================================================================
-# XRS 光谱处理参数
-# ----------------------------------------------------------------------------
-# null / [] 表示"尚未确定"。运行到对应阶段时程序会弹出图形界面让你调整，
-# 调好的值会自动写回本文件（注释和键顺序都会保留）。
-#
-# 逐阶段运行：
-#   python run_xrs.py config.yaml                  从第一个未完成的阶段开始
-#   python run_xrs.py run config.yaml --stage sum  只跑 sum 阶段
-#   python run_xrs.py run config.yaml --no-ui      不做交互，只用下面已填好的值
-#   python run_xrs.py check config.yaml            只检查每个阶段还缺哪些参数
-#
-# 本文件既不是"只读输入"，也不是"运行产物"：它是你和程序共同的参数账本。
+# XRS spectrum processing configuration
+# Empty values (null or []) are requested interactively and written back here.
+# Use --no-ui only after all required values and ROI files are available.
 # ============================================================================
 
-# ---------------------------------------------------------------------------
-# 数据位置
-# ---------------------------------------------------------------------------
+# Data locations
 data:
-  # 数据根目录，换 beamtime 后必须改。例：/hepsdatafs/ID33/202504/Data/GID33-250416-01/
+  # Beamtime data root. Example: /hepsdatafs/ID33/202504/Data/GID33-250416-01/
   root: null
-  # 相对 data.root 的子目录
   raw_subdir: raw
   processed_subdir: processed
 
-# ---------------------------------------------------------------------------
-# 弹性峰扫描：用来定位晶体 ROI 并拟合弹性峰中心
-# ---------------------------------------------------------------------------
+# Elastic scans used to establish ROI geometry and fit elastic centers.
 elastic:
-  # 弹性峰数据编号，例：[14522]
+  # All configured scans are normalized, concatenated, and fitted.
   scan_ids: []
-  # 弹性峰数据是否除以 I0
   divide_by_i0: true
-  # 归一化用的 PV 名
   i0_pv: D_SiC_I_A
-  # 能量 PV 名；null = 自动探测（按 M_DCM_B5Energy_readback → M_DCM_B5Link_Energy_readback 顺序）
+  # null enables automatic PV detection.
   energy_pv: null
 
-  # 'regular'（读矩形 ROI 文件）或 'auto'（读中心点文件后自动分割）
+  # regular = rectangular TSV geometry; auto = segmented HDF5 geometry.
   roi_mode: null
 
-  # roi_mode = regular 时使用，制表符分隔，列：roi_label x1 x2 y1 y2 x_shift y_shift x_expand y_expand
   regular_files:
-    lambda: null      # 例：roi/roi_60crystals-v3.txt
-    minipix: null     # 例：roi/roi_minipix-v3.txt
+    lambda: null      # Example: roi/roi_lambda.txt
+    minipix: null     # Example: roi/roi_minipix.txt
 
-  # roi_mode = auto 时使用，三列 roi_label x y（空格/制表符/逗号均可）
-  # 这是"几何校准"的产物，和分析参数解耦；几何变了用 pick-roi / propose-roi 重建
+  # Versioned irregular ROI geometry.
+  auto_files:
+    lambda: null      # Example: roi/auto_ROI_lambda.h5
+    minipix: null     # Example: roi/auto_ROI_minipix.h5
+
+  # Legacy center tables accepted as migration inputs.
   auto_centers:
-    lambda: null      # 例：roi/auto_ROI_lambda.txt
-    minipix: null     # 例：roi/auto_ROI_minipix.txt
+    lambda: null      # Example: roi/auto_ROI_lambda.txt
+    minipix: null     # Example: roi/auto_ROI_minipix.txt
 
   auto_params:
-    smooth_sigma: 2.0          # 分割前高斯平滑的 sigma
-    threshold_tightness: 1.0   # >1 收紧阈值，<1 放宽
-    min_area: 20               # 小于这么多像素的连通域判为失败
-    on_roi_failure: warn       # warn（记警告继续）或 error（直接中止）
+    smooth_sigma: 2.0
+    threshold_tightness: 1.0
+    min_area: 20
+    on_roi_failure: warn       # warn or error
 
-  # 是否用 mask 滤掉 ROI 内低于阈值的像素。
-  # 注意：这个开关对 elastic 和 xrs 两个阶段同时生效（沿用原 notebook 的语义）。
+  # Relative-intensity filtering and regular-ROI adaptation.
   use_filter: true
-  filter_value: 0.15    # 阈值 = ROI 内最大值 × 该系数
-  auto_adjust: false    # regular 模式下是否按峰值自动平移/缩放矩形
-  roi_size: 30          # regular + auto_adjust 时的正方形边长
+  filter_value: 0.15
+  auto_adjust: false
+  roi_size: 30
 
-  # 批量拟合弹性峰
   fit:
-    e_lowlim: 9.67        # 拟合中心允许的下限 (keV)；Si(660)=9.67，Si(880)=12.9
-    e_highlim: 9.69       # 拟合中心允许的上限 (keV)；Si(660)=9.69，Si(880)=12.92
-    max_fwhm_ev: 2.0      # 峰宽大于该值判为 bad fit
-    min_r_squared: 0.8    # R² 小于该值判为 bad fit
+    e_lowlim: 9.67
+    e_highlim: 9.69
+    max_fwhm_ev: 2.0
+    min_r_squared: 0.8
 
-# ---------------------------------------------------------------------------
-# XRS 扫描
-# ---------------------------------------------------------------------------
+# Inelastic XRS scans.
 xrs:
-  scan_ids: []            # 例：[14524]；支持多个
+  scan_ids: []
   divide_by_i0: true
-  i0_pv: D_SiC_I_A         # 'D_QXBPM_I_Sum' / 'D_QXBPM2_I_Sum' / 'D_SiC_I_A'
-  energy_pv: null          # null = 自动探测
-  remove_i0_glitches: true # 去掉 I0 上"掉光"造成的凹点
-  exclude_scans: []        # 手动剔除的数据编号（对应 readH5 打印的圆括号序号），例：[0, 16, 17]
+  i0_pv: D_SiC_I_A
+  energy_pv: null
+  remove_i0_glitches: true
+  exclude_scans: []
 
-# ---------------------------------------------------------------------------
-# Q 计算
-# ---------------------------------------------------------------------------
+# Momentum-transfer calculation.
 q:
-  # 各模组整体角度（度），顺序固定为 ['VB', 'VU', 'VD', 'HB', 'HL', 'HR']
+  # Module order: VB, VU, VD, HB, HL, HR.
   module_angles_deg: []
-  # 用哪个值当入射能 Ei：
-  #   as_before —— 保持原 notebook 行为（好拟合用 9.685 标称值，只有 bad fit 才用拟合中心）
-  #   nominal   —— 一律用 9.685
-  #   fitted    —— 一律用拟合出的中心
+  # as_before, nominal, or fitted
   elastic_energy_source: as_before
 
-# ---------------------------------------------------------------------------
-# 内插叠加
-# ---------------------------------------------------------------------------
+# Interpolation and combination.
 sum:
-  modules: []             # 要叠加的模组，例：['VD'] 或 ['HB','VD','VU','VB']
-  q_range: [0, 10]        # 参与叠加的 q 范围（Å⁻¹）
-  exclude_rois: []        # 手动剔除的晶体名，例：['VU-B1']
-  energy_step_ev: 0.2     # 能量内插步长 (eV)
+  modules: []
+  q_range: [0, 10]
+  exclude_rois: []
+  energy_step_ev: 0.2
 
-# ---------------------------------------------------------------------------
-# 输出
-# ---------------------------------------------------------------------------
+# Output files.
 output:
-  filename: null          # 输出目录名，写在 <data.root>/<processed_subdir>/<filename>/
-  # combined    —— 所有选中 ROI 叠加成一条谱
-  # per_module  —— 每个模组各一条谱
-  # per_crystal —— 每个晶体各一条谱
+  filename: null
+  # combined, per_module, or per_crystal
   mode: combined
 
-# ---------------------------------------------------------------------------
-# 界面
-# ---------------------------------------------------------------------------
+# User interface and QC figures.
 ui:
-  check_crystal: []       # 需要单独画图检查的晶体名，例：['VD-C1']
-  dpi: 150                # QC 图片分辨率
+  check_crystal: []
+  dpi: 150
