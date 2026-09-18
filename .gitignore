@@ -1,0 +1,13 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# python
+__pycache__/
+*.py[cod]
+
+# 测试临时目录（不要用 tmp_path：它建 0700 目录，受限环境下不可写）
+tests/_work/
+
+# pytest
+.pytest_cache/

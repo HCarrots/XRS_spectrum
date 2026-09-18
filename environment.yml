@@ -1,0 +1,25 @@
+# Linux 服务器上的 conda 环境。
+#   conda env create -f environment.yml
+#   conda activate xrs
+#
+# 包列表必须与 pixi.toml 的 [dependencies] 保持一致；
+# `python run_xrs.py check config.yaml` 会检查两者是否漂移。
+name: xrs
+channels:
+  - conda-forge
+dependencies:
+  - python >=3.14,<3.15
+  - pip
+  - numpy >=2.5.3,<3
+  - scipy >=1.18.1,<2
+  - matplotlib >=3.11.2,<4
+  - pandas >=3.0.5,<4
+  - h5py >=3.16.0,<4
+  - scikit-image >=0.26.0,<0.27
+  - pyyaml >=6.0.3,<7
+  - ruamel.yaml >=0.19.1,<0.20
+  - pytest >=9.1.1,<10
+  # conda-forge 的 scipy 是针对 OpenBLAS 构建的。如果环境里混进 MKL 变体的
+  # libblas，scipy.optimize.curve_fit（即 MINPACK）会以 Windows 延迟加载
+  # 失败（0xC06D007F）直接崩掉进程，Python 层捕不到。这里显式钉住 OpenBLAS。
+  - libblas=*=*openblas
