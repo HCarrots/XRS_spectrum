@@ -310,6 +310,18 @@ def test_end_to_end(work_dir, mode, capsys):
         assert (figures / name).is_file(), f" QC  {name}"
 
 
+def test_regular_end_to_end_allows_empty_minipix(work_dir, capsys):
+    config_path = build_case(work_dir / "case", mode="regular")
+    cfg = Config.load(config_path)
+    minipix_path = cfg.resolve(cfg.get("elastic.regular_files.minipix"))
+    xrsp.write_regular_rois(minipix_path, [])
+
+    assert _run(config_path) == 0, capsys.readouterr().out
+    elastic = np.load(cfg.state_dir / "elastic.npz", allow_pickle=False)
+    assert set(elastic["roi_detectors"].tolist()) == {"lambda"}
+    assert int(elastic["mask_count"][0]) == len(REGULAR_BOXES)
+
+
 def test_elastic_uses_all_configured_scans(work_dir):
     config_path = build_case(work_dir / "case", mode="regular")
     raw = config_path.parent / "raw"
@@ -554,6 +566,20 @@ def test_rectangle_editor_redraws_last_roi_and_preserves_selector(monkeypatch):
         ("A1", 4, 10, 5, 12),
         ("A2", 14, 20, 6, 13),
     ]
+    plt.close("all")
+
+
+def test_rectangle_editor_enter_accepts_empty_detector(monkeypatch):
+    def action(figure, state):
+        assert getattr(figure.canvas.manager, "key_press_handler_id", None) is None
+        _key(figure, "enter")
+        assert state == {"done": True, "accepted": True}
+
+    ui, plt = _interactive_ui(monkeypatch, action)
+    rectangles = ui.pick_rectangles(
+        np.zeros((30, 40)), ("A1", "A2"), "Draw Minipix rectangular ROIs"
+    )
+    assert rectangles == []
     plt.close("all")
 
 

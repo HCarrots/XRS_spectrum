@@ -327,6 +327,7 @@ class UI:
         if figure is None:
             figure = plt.figure(figsize=figsize)
         figure.clear()
+        _disable_default_key_handler(figure)
         axis = figure.add_subplot(111)
         source = np.asarray(image, dtype=float)
         height, width = source.shape
@@ -417,7 +418,7 @@ class UI:
                 placed.clear()
                 actions.clear()
                 redraw()
-            elif event.key == "enter" and placed:
+            elif event.key == "enter":
                 state.update(done=True, accepted=True)
             elif event.key == "escape":
                 state.update(done=True, accepted=False)
@@ -563,6 +564,7 @@ class UI:
         if figure is None:
             figure = plt.figure(figsize=figsize)
         figure.clear()
+        _disable_default_key_handler(figure)
         axis = figure.add_subplot(111)
         axis.imshow(np.log1p(np.clip(np.asarray(image, dtype=float), 0, None)), cmap="gray")
         axis.set_title(
@@ -756,6 +758,15 @@ def _keep_widgets_alive(figure, *widgets) -> None:
         retained = []
         figure._xrs_widgets = retained
     retained.extend(widgets)
+
+
+def _disable_default_key_handler(figure) -> None:
+    """Disable Matplotlib shortcuts that conflict with editor key bindings."""
+    manager = getattr(figure.canvas, "manager", None)
+    callback_id = getattr(manager, "key_press_handler_id", None)
+    if callback_id is not None:
+        figure.canvas.mpl_disconnect(callback_id)
+        manager.key_press_handler_id = None
 
 
 def _run_event_loop(figure, state: dict) -> None:

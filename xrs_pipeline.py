@@ -194,6 +194,9 @@ def _roi_spectra(stack, boxes, masks):
         roi_stack = stack[:, y1:y2, x1:x2]
         raw.append(roi_stack.sum(axis=(1, 2)))
         masked.append((roi_stack * mask[y1:y2, x1:x2]).sum(axis=(1, 2)))
+    if not raw:
+        empty = np.empty((0, int(stack.shape[0])), dtype=float)
+        return empty, empty.copy()
     return np.asarray(raw, dtype=float), np.asarray(masked, dtype=float)
 
 
@@ -565,6 +568,8 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
                 detectors.append(detector)
                 boxes.append((roi.y1, roi.y2, roi.x1, roi.x2))
                 masks.append(mask)
+        if not names:
+            raise ConfigError("At least one ROI is required across all detectors")
         finite = np.asarray(
             [row for detector in _DETECTORS for row in curves[detector]], dtype=float
         )
