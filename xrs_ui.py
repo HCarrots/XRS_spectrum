@@ -259,9 +259,11 @@ class UI:
             axis.set_ylabel("y")
         state = {"done": False, "accepted": False}
         button_axis = figure.add_axes([0.43, 0.02, 0.14, 0.05])
-        Button(button_axis, "Continue", color="0.85").on_clicked(
+        continue_button = Button(button_axis, "Continue", color="0.85")
+        continue_button.on_clicked(
             lambda _event: state.update(done=True, accepted=True)
         )
+        _keep_widgets_alive(figure, continue_button)
         figure.suptitle(title)
         figure.canvas.mpl_connect(
             "key_press_event",
@@ -291,12 +293,15 @@ class UI:
         state = {"done": False, "accepted": False, "redraw": False}
         use_axis = figure.add_axes([0.34, 0.02, 0.14, 0.05])
         redraw_axis = figure.add_axes([0.52, 0.02, 0.14, 0.05])
-        Button(use_axis, "Use existing", color="0.85").on_clicked(
+        use_button = Button(use_axis, "Use existing", color="0.85")
+        redraw_button = Button(redraw_axis, "Redraw", color="0.92")
+        use_button.on_clicked(
             lambda _event: state.update(done=True, accepted=True)
         )
-        Button(redraw_axis, "Redraw", color="0.92").on_clicked(
+        redraw_button.on_clicked(
             lambda _event: state.update(done=True, accepted=True, redraw=True)
         )
+        _keep_widgets_alive(figure, use_button, redraw_button)
         def on_key(event):
             if event.key == "enter":
                 state.update(done=True, accepted=True)
@@ -690,12 +695,15 @@ class UI:
         ax_keep = figure.add_axes([0.17, 0.01, 0.13, 0.05])
         from matplotlib.widgets import Button
 
-        Button(ax_ok, "Done", color="0.85", hovercolor="0.75").on_clicked(
+        done_button = Button(ax_ok, "Done", color="0.85", hovercolor="0.75")
+        keep_button = Button(ax_keep, "Keep all", color="0.92", hovercolor="0.85")
+        done_button.on_clicked(
             lambda _e: (state.update(done=True, accepted=True))
         )
-        Button(ax_keep, "Keep all", color="0.92", hovercolor="0.85").on_clicked(
+        keep_button.on_clicked(
             lambda _e: (dropped.clear(), redraw())
         )
+        _keep_widgets_alive(figure, done_button, keep_button)
 
         figure.canvas.mpl_connect("button_press_event", on_click)
         figure.canvas.mpl_connect("key_press_event", on_key)
@@ -707,6 +715,15 @@ class UI:
         return sorted(dropped)
 
 # English note.
+
+
+def _keep_widgets_alive(figure, *widgets) -> None:
+    """Retain Matplotlib widgets for as long as their figure exists."""
+    retained = getattr(figure, "_xrs_widgets", None)
+    if retained is None:
+        retained = []
+        figure._xrs_widgets = retained
+    retained.extend(widgets)
 
 
 def _run_event_loop(figure, state: dict) -> None:

@@ -491,6 +491,43 @@ def _interactive_ui(monkeypatch, action):
     return ui, plt
 
 
+def test_preview_continue_button_remains_clickable(monkeypatch):
+    import gc
+
+    import numpy as np
+
+    def action(figure, state):
+        gc.collect()
+        assert [widget.label.get_text() for widget in figure._xrs_widgets] == ["Continue"]
+        figure._xrs_widgets[0]._observers.process("clicked", None)
+        assert state == {"done": True, "accepted": True}
+
+    ui, plt = _interactive_ui(monkeypatch, action)
+    ui.preview_images({"lambda": np.zeros((8, 8)), "minipix": np.zeros((8, 8))})
+    plt.close("all")
+
+
+def test_review_redraw_button_remains_clickable(monkeypatch):
+    import gc
+
+    import numpy as np
+
+    def action(figure, state):
+        gc.collect()
+        assert [widget.label.get_text() for widget in figure._xrs_widgets] == [
+            "Use existing",
+            "Redraw",
+        ]
+        figure._xrs_widgets[1]._observers.process("clicked", None)
+
+    ui, plt = _interactive_ui(monkeypatch, action)
+    reuse = ui.review_geometry(
+        np.zeros((8, 8)), ["A1"], [(1, 4, 2, 6)], "Review"
+    )
+    assert reuse is False
+    plt.close("all")
+
+
 def test_pick_points_collects_clicks_in_label_order(monkeypatch):
     import numpy as np
 
