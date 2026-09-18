@@ -241,9 +241,16 @@ def _close(fig) -> None:
     plt.close(fig)
 
 
-def _pack_masks(masks) -> np.ndarray:
-    """Implementation notes for _pack_masks."""
-    stacked = np.asarray(masks, dtype=bool)
+def _pack_masks(masks, image_shape) -> np.ndarray:
+    """Pack masks for one detector, including an empty detector."""
+    height, width = (int(value) for value in image_shape)
+    if not masks:
+        return np.empty((0, (height * width + 7) // 8), dtype=np.uint8)
+    stacked = np.stack([np.asarray(mask, dtype=bool) for mask in masks])
+    if stacked.shape[1:] != (height, width):
+        raise ValueError(
+            f"Mask shape {stacked.shape[1:]} does not match detector shape {(height, width)}"
+        )
     flat = stacked.reshape(stacked.shape[0], -1)
     return np.packbits(flat, axis=1)
 
@@ -645,7 +652,6 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
         "roi_names": state["names"],
         "roi_detectors": state["detectors"],
         "boxes": np.asarray(state["boxes"], dtype=np.int64),
-        "masks_packed": _pack_masks(state["masks"]),
         "mask_count": np.asarray([len(state["masks"])]),
         "fit_center_kev": fits["center_kev"],
         "fit_fwhm_ev": fits["fwhm_ev"],
@@ -666,6 +672,15 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
         "image_shape": np.asarray(grid["lambda"], dtype=np.int64),
         "roi_mode": np.asarray([mode]),
     }
+    for detector in _DETECTORS:
+        detector_masks = state["workflow"][detector]["masks"]
+        payload[f"masks_packed_{detector}"] = _pack_masks(
+            detector_masks, grid[detector]
+        )
+        payload[f"mask_count_{detector}"] = np.asarray([len(detector_masks)])
+        payload[f"image_shape_{detector}"] = np.asarray(
+            grid[detector], dtype=np.int64
+        )
     return payload
 
 
@@ -993,18 +1008,42 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
     names = np.asarray(elastic["roi_names"], dtype=str)
     detectors = np.asarray(elastic["roi_detectors"], dtype=str)
     boxes = np.asarray(elastic["boxes"], dtype=np.int64)
-    expected_shape = tuple(int(v) for v in elastic["image_shape"])
-    masks_all = _unpack_masks(
-        elastic["masks_packed"], expected_shape, int(elastic["mask_count"][0])
+    stack_by_detector = {"lambda": lambda_stacks, "minipix": minipix_stacks}
+    masks_by_detector = {}
+    has_detector_masks = all(
+        f"masks_packed_{detector}" in elastic for detector in _DETECTORS
     )
-
-    for detector in _DETECTORS:
-        actual = {"lambda": lambda_stacks, "minipix": minipix_stacks}[detector][0].shape[1:]
-        if tuple(actual) != expected_shape:
-            raise ConfigError(
-                f"{detector} XRS image shape {actual} differs from elastic shape "
-                f"{expected_shape}; ROI geometry cannot be reused"
+    if has_detector_masks:
+        for detector in _DETECTORS:
+            expected_shape = tuple(
+                int(value) for value in elastic[f"image_shape_{detector}"]
             )
+            actual_shape = tuple(stack_by_detector[detector][0].shape[1:])
+            if actual_shape != expected_shape:
+                raise ConfigError(
+                    f"{detector} XRS image shape {actual_shape} differs from its "
+                    f"elastic image shape {expected_shape}; ROI geometry cannot be reused"
+                )
+            masks_by_detector[detector] = _unpack_masks(
+                elastic[f"masks_packed_{detector}"],
+                expected_shape,
+                int(elastic[f"mask_count_{detector}"][0]),
+            )
+    else:
+        expected_shape = tuple(int(value) for value in elastic["image_shape"])
+        masks_all = _unpack_masks(
+            elastic["masks_packed"], expected_shape, int(elastic["mask_count"][0])
+        )
+        for detector in _DETECTORS:
+            selector = detectors == detector
+            actual_shape = tuple(stack_by_detector[detector][0].shape[1:])
+            if selector.any() and actual_shape != expected_shape:
+                raise ConfigError(
+                    "The elastic cache uses the legacy shared-mask format and cannot "
+                    f"represent {detector} shape {actual_shape}. Rerun from the elastic "
+                    "stage with --force to create detector-specific masks."
+                )
+            masks_by_detector[detector] = masks_all[selector]
 
     per_scan_raw, per_scan_masked = [], []
     for index in range(len(kept_2D)):
@@ -1012,7 +1051,7 @@ def run_xrs(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool = Fal
         for detector, stack_source in (("lambda", lambda_stacks), ("minipix", minipix_stacks)):
             selector = detectors == detector
             raw, masked = _roi_spectra(
-                stack_source[index], boxes[selector], masks_all[selector]
+                stack_source[index], boxes[selector], masks_by_detector[detector]
             )
             raw_parts.append(raw)
             masked_parts.append(masked)

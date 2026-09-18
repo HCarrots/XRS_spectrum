@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -333,6 +334,29 @@ def test_regular_end_to_end_allows_one_empty_detector(
     assert int(elastic["mask_count"][0]) == len(REGULAR_BOXES)
 
 
+def test_end_to_end_supports_detector_specific_image_shapes(work_dir, capsys):
+    config_path = build_case(work_dir / "case", mode="regular")
+    raw = config_path.parent / "raw"
+    for scan_id, suffix in (
+        (ELASTIC_SCAN_ID, "elastic"),
+        (XRS_SCAN_ID, "xrs"),
+    ):
+        path = raw / f"{scan_id}_{suffix}.nxs"
+        with h5py.File(path, "a") as handle:
+            dataset_path = "entry/data/D_MINIPIX"
+            cropped = handle[dataset_path][:, :40, :50]
+            del handle[dataset_path]
+            handle.create_dataset(dataset_path, data=cropped, compression="gzip")
+
+    assert _run(config_path) == 0, capsys.readouterr().out
+    cfg = Config.load(config_path)
+    elastic = np.load(cfg.state_dir / "elastic.npz", allow_pickle=False)
+    assert elastic["image_shape_lambda"].tolist() == [48, 60]
+    assert elastic["image_shape_minipix"].tolist() == [40, 50]
+    assert int(elastic["mask_count_lambda"][0]) == len(REGULAR_BOXES)
+    assert int(elastic["mask_count_minipix"][0]) == len(REGULAR_BOXES)
+
+
 def test_elastic_uses_all_configured_scans(work_dir):
     config_path = build_case(work_dir / "case", mode="regular")
     raw = config_path.parent / "raw"
@@ -476,6 +500,8 @@ def test_run_stage_returns_arrays(work_dir):
     assert payload["bad_fit"].shape == (2 * len(REGULAR_BOXES),)
     assert int(payload["mask_count"][0]) == 2 * len(REGULAR_BOXES)
     assert payload["image_shape"].tolist() == [48, 60]
+    assert payload["image_shape_lambda"].tolist() == [48, 60]
+    assert payload["image_shape_minipix"].tolist() == [48, 60]
     assert any(message.startswith("[elastic] badFit =") for message in messages)
     assert any(message.startswith("[elastic] fitResult:\n") for message in messages)
 
