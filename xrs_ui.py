@@ -333,6 +333,7 @@ class UI:
         axis.imshow(np.log1p(np.clip(source, 0, None)), cmap="gray")
         placed = []
         actions = []
+        roi_artists = []
         state = {"done": False, "accepted": False}
 
         def next_label():
@@ -340,21 +341,36 @@ class UI:
             return labels[position] if position < len(labels) else None
 
         def redraw():
-            for patch in list(axis.patches):
-                patch.remove()
-            for text_item in list(axis.texts):
-                text_item.remove()
+            while roi_artists:
+                artist = roi_artists.pop()
+                if artist.axes is not None:
+                    artist.remove()
             for label, x1, x2, y1, y2 in placed:
-                axis.add_patch(Rectangle((x1, y1), x2 - x1, y2 - y1,
-                                         edgecolor="red", facecolor="none", lw=0.9))
-                axis.text(x1, y1, label, color="yellow", fontsize=7)
+                rectangle = Rectangle(
+                    (x1, y1), x2 - x1, y2 - y1,
+                    edgecolor="red", facecolor="none", lw=1.2,
+                )
+                roi_artists.append(axis.add_patch(rectangle))
+                roi_artists.append(
+                    axis.text(x1, y1, label, color="yellow", fontsize=7)
+                )
             upcoming = next_label()
             status = f"Next: {upcoming}" if upcoming else "All labels handled"
             figure.suptitle(
-                f"{title} | {status}\nDrag: add | S: skip | Backspace: undo | "
-                "R: reset | Enter: finish | Esc: cancel"
+                f"{title} | {status}\n"
+                "Drag: draw | S: skip | C/U/Backspace: cancel last | "
+                "R: redraw last | A: start over | Enter: save and continue | "
+                "Esc: cancel detector"
             )
             figure.canvas.draw_idle()
+
+        def undo_last():
+            if not actions:
+                return
+            action, _label = actions.pop()
+            if action == "place":
+                placed.pop()
+            redraw()
 
         def on_select(click, release):
             label = next_label()
@@ -372,20 +388,35 @@ class UI:
             actions.append(("place", str(label)))
             redraw()
 
-        selector = RectangleSelector(axis, on_select, useblit=False, button=[1],
-                                     minspanx=1, minspany=1, spancoords="data")
+        selector = RectangleSelector(
+            axis,
+            on_select,
+            useblit=True,
+            button=[1],
+            minspanx=1,
+            minspany=1,
+            spancoords="data",
+            props={
+                "facecolor": "tab:orange",
+                "edgecolor": "yellow",
+                "alpha": 0.30,
+                "fill": True,
+            },
+        )
+        _keep_widgets_alive(figure, selector)
+
         def on_key(event):
-            if event.key in {"backspace", "delete"}:
-                if actions:
-                    action, _label = actions.pop()
-                    if action == "place":
-                        placed.pop()
-                redraw()
+            if event.key in {"backspace", "delete", "c", "C", "u", "U"}:
+                undo_last()
             elif event.key in {"s", "S"} and next_label() is not None:
                 actions.append(("skip", str(next_label())))
                 redraw()
             elif event.key in {"r", "R"}:
-                placed.clear(); actions.clear(); redraw()
+                undo_last()
+            elif event.key in {"a", "A"}:
+                placed.clear()
+                actions.clear()
+                redraw()
             elif event.key == "enter" and placed:
                 state.update(done=True, accepted=True)
             elif event.key == "escape":
@@ -394,6 +425,7 @@ class UI:
         redraw()
         _run_event_loop(figure, state)
         selector.set_active(False)
+        plt.close(figure)
         if not state["accepted"]:
             raise UiCancelled(f"{title} was cancelled")
         return list(placed)

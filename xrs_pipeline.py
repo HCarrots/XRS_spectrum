@@ -346,6 +346,9 @@ def _prepare_roi_inputs(cfg: Config, ui: UI, images, scan_ids, log) -> str:
                 _backup(target, log)
                 count = xrsp.write_regular_rois(target, rectangles)
                 log(f"[ROI] Wrote {count} rectangular ROIs to {target}")
+            cfg.save()
+            if detector == "lambda":
+                log("[ROI] Lambda ROI file is saved; opening the Minipix editor")
             continue
 
         target = _auto_target(cfg, detector)

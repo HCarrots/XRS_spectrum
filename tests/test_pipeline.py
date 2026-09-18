@@ -22,7 +22,7 @@ from conftest import (
 )
 from run_xrs import main
 from xrs_config import STAGE_ORDER, Config, ConfigError, environment_parity
-from xrs_pipeline import _remove_i0_glitches, run_stage
+from xrs_pipeline import _prepare_roi_inputs, _remove_i0_glitches, run_stage
 from xrs_ui import UI
 
 
@@ -526,6 +526,73 @@ def test_review_redraw_button_remains_clickable(monkeypatch):
     )
     assert reuse is False
     plt.close("all")
+
+
+def test_rectangle_editor_redraws_last_roi_and_preserves_selector(monkeypatch):
+    from types import SimpleNamespace
+
+    def selection(x1, y1, x2, y2):
+        return (
+            SimpleNamespace(xdata=x1, ydata=y1),
+            SimpleNamespace(xdata=x2, ydata=y2),
+        )
+
+    def action(figure, state):
+        selector = figure._xrs_widgets[0]
+        selector.onselect(*selection(2, 3, 8, 9))
+        assert selector._selection_artist.axes is figure.axes[0]
+        _key(figure, "r")
+        selector.onselect(*selection(4, 5, 10, 12))
+        selector.onselect(*selection(14, 6, 20, 13))
+        _key(figure, "enter")
+
+    ui, plt = _interactive_ui(monkeypatch, action)
+    rectangles = ui.pick_rectangles(
+        np.zeros((30, 40)), ("A1", "A2"), "Draw Lambda rectangular ROIs"
+    )
+    assert rectangles == [
+        ("A1", 4, 10, 5, 12),
+        ("A2", 14, 20, 6, 13),
+    ]
+    plt.close("all")
+
+
+def test_regular_roi_saves_lambda_before_opening_minipix(work_dir):
+    config_path = build_case(work_dir / "case", mode="regular")
+    cfg = Config.load(config_path)
+    lambda_path = cfg.resolve(cfg.get("elastic.regular_files.lambda"))
+    minipix_path = cfg.resolve(cfg.get("elastic.regular_files.minipix"))
+    lambda_path.unlink()
+    minipix_path.unlink()
+    opened = []
+
+    class SequentialUI:
+        interactive = True
+
+        @staticmethod
+        def preview_images(_images, _title):
+            return None
+
+        @staticmethod
+        def pick_rectangles(_image, labels, title):
+            opened.append(title)
+            if "Minipix" in title:
+                assert lambda_path.is_file()
+            return [(str(labels[0]), 1, 4, 2, 6)]
+
+    mode = _prepare_roi_inputs(
+        cfg,
+        SequentialUI(),
+        {"lambda": np.zeros((10, 12)), "minipix": np.zeros((10, 12))},
+        [ELASTIC_SCAN_ID],
+        log=lambda _message: None,
+    )
+    assert mode == "regular"
+    assert lambda_path.is_file() and minipix_path.is_file()
+    assert opened == [
+        "Draw Lambda rectangular ROIs",
+        "Draw Minipix rectangular ROIs",
+    ]
 
 
 def test_pick_points_collects_clicks_in_label_order(monkeypatch):
