@@ -594,15 +594,15 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
     import matplotlib.pyplot as plt
 
 # English note.
-    qc_figure = plt.figure(figsize=(16, 9))
-    qc_axes = qc_figure.subplots(2, 3, squeeze=False)
+    qc_figure = plt.figure(figsize=(18, 6))
+    qc_axes = qc_figure.subplots(1, 3, squeeze=False)
 
     if ui.interactive:
 # English note.
 # English note.
-        tune_figure = plt.figure(figsize=(16, 9))
+        tune_figure = plt.figure(figsize=(20, 6))
         tune_axes = tune_figure.subplots(
-            2, 3, gridspec_kw={"right": 0.68}, squeeze=False
+            1, 3, gridspec_kw={"right": 0.68}, squeeze=False
         )
 
         def draw(current: dict) -> None:
@@ -635,6 +635,12 @@ def run_elastic(cfg: Config, ui: UI, log, force: bool = False, overwrite: bool =
     cfg.save()
 
     fits = state["fits"]
+    fit_result = _fit_result_table(state)
+    bad_names = fit_result.loc[fit_result["bad_fit"], "crystal"].tolist()
+    log(f"[elastic] badFit = {bad_names}")
+    log("[elastic] fitResult:\n" + fit_result.to_string(index=False))
+    _inspect_elastic_fits(ui, state, energy, log)
+
     payload = {
         "roi_names": state["names"],
         "roi_detectors": state["detectors"],
@@ -713,7 +719,7 @@ def _fit_all(names, energy_kev, curves, fit_cfg, log) -> tuple[dict, np.ndarray]
 
 
 def _draw_elastic(axes, state, energy, cfg) -> None:
-    """Implementation notes for _draw_elastic."""
+    """Draw detector masks and elastic data with fitted peak curves."""
     from matplotlib.patches import Rectangle
 
     for axis in np.asarray(axes).ravel():
@@ -748,45 +754,116 @@ def _draw_elastic(axes, state, energy, cfg) -> None:
             )
 
     axis = axes[0][2]
-    axis.plot(energy, state["curves"].T, lw=0.6)
-    axis.set_title("Elastic ROI sums (one curve per ROI)")
+    fit_energy = np.linspace(float(np.min(energy)), float(np.max(energy)), 800)
+    for index, (name, curve) in enumerate(zip(state["names"], state["curves"])):
+        suffix = " [bad]" if state["bad"][index] else ""
+        line = axis.plot(
+            energy, curve, "o", ms=2.0, alpha=0.65, label=f"{name}{suffix}"
+        )[0]
+        fit = state["fits"]
+        fit_curve = xrsp.lorentzian(
+            fit_energy,
+            fit["amp"][index],
+            fit["center_kev"][index],
+            fit["fwhm_ev"][index] / 2000.0,
+            fit["bkg"][index],
+        )
+        axis.plot(
+            fit_energy,
+            fit_curve,
+            color="red" if state["bad"][index] else line.get_color(),
+            ls="--" if state["bad"][index] else "-",
+            lw=0.9,
+        )
+    axis.set_title(f"Elastic peak fits ({int(state['bad'].sum())} bad)")
     axis.set_xlabel(f"{cfg.get('elastic.energy_pv')} (keV)")
     axis.set_ylabel("counts")
+    if len(state["names"]) <= 20:
+        axis.legend(fontsize=6, ncol=2)
 
-    axis = axes[1][0]
-    orders = np.argsort(state["fits"]["center_ev"])
-    axis.plot(orders, state["fits"]["center_ev"][orders], "o-", ms=3)
-    axis.axhspan(
-        float(cfg.get("elastic.fit.e_lowlim", 9.67)) * 1000,
-        float(cfg.get("elastic.fit.e_highlim", 9.69)) * 1000,
-        color="green", alpha=0.15, label="allowed window",
-    )
-    bad_idx = np.nonzero(state["bad"])[0]
-    axis.plot(bad_idx, state["fits"]["center_ev"][bad_idx], "rx", ms=8, label="bad fit")
-    axis.set_title(f"Fit centers ({len(bad_idx)} bad fits)")
-    axis.set_xlabel("ROI index")
-    axis.set_ylabel("center (eV)")
-    axis.legend(fontsize=8)
 
-    axis = axes[1][1]
-    axis.plot(np.arange(len(state["fits"]["r2"])), state["fits"]["r2"], "o-", ms=3)
-    axis.axhline(
-        float(cfg.get("elastic.fit.min_r_squared", 0.8)),
-        color="red", ls="--", lw=1, label="R-squared minimum",
+def _fit_result_table(state) -> pd.DataFrame:
+    """Build the elastic fitResult table shown in the terminal."""
+    boxes = np.asarray(state["boxes"], dtype=np.int64).reshape(-1, 4)
+    fits = state["fits"]
+    return pd.DataFrame(
+        {
+            "crystal": np.asarray(state["names"], dtype=str),
+            "detector": np.asarray(state["detectors"], dtype=str),
+            "x1": boxes[:, 2],
+            "x2": boxes[:, 3],
+            "y1": boxes[:, 0],
+            "y2": boxes[:, 1],
+            "center": fits["center_ev"],
+            "width": fits["fwhm_ev"],
+            "height": fits["amp"],
+            "background": fits["bkg"],
+            "r-square": fits["r2"],
+            "bad_fit": np.asarray(state["bad"], dtype=bool),
+        }
     )
-    axis.set_title("Fit R-squared")
-    axis.set_xlabel("ROI index")
-    axis.legend(fontsize=8)
 
-    axis = axes[1][2]
-    axis.plot(np.arange(len(state["fits"]["fwhm_ev"])), state["fits"]["fwhm_ev"], "o-", ms=3)
-    axis.axhline(
-        float(cfg.get("elastic.fit.max_fwhm_ev", 2.0)),
-        color="red", ls="--", lw=1, label="FWHM maximum",
+
+def _draw_elastic_inspection(state, energy_kev, roi_name: str):
+    """Draw one ROI fit and all curves shifted to zero energy transfer."""
+    import matplotlib.pyplot as plt
+
+    matches = np.flatnonzero(np.asarray(state["names"], dtype=str) == str(roi_name))
+    if matches.size == 0:
+        raise KeyError(roi_name)
+    index = int(matches[0])
+    fits = state["fits"]
+    figure, axes = plt.subplots(1, 2, figsize=(16, 6))
+    figure.subplots_adjust(bottom=0.16, wspace=0.25)
+
+    fit_energy = np.linspace(float(np.min(energy_kev)), float(np.max(energy_kev)), 1000)
+    fit_curve = xrsp.lorentzian(
+        fit_energy,
+        fits["amp"][index],
+        fits["center_kev"][index],
+        fits["fwhm_ev"][index] / 2000.0,
+        fits["bkg"][index],
     )
-    axis.set_title("Fit FWHM (eV)")
-    axis.set_xlabel("ROI index")
-    axis.legend(fontsize=8)
+    axes[0].plot(energy_kev, state["curves"][index], "o", ms=4, label="Data")
+    axes[0].plot(fit_energy, fit_curve, lw=1.4, label="Fitted")
+    axes[0].set_title(
+        f"{roi_name}: center={fits['center_ev'][index]:.3f} eV, "
+        f"FWHM={fits['fwhm_ev'][index]:.3f} eV, "
+        f"R²={fits['r2'][index]:.4f}"
+    )
+    axes[0].set_xlabel("Energy (keV)")
+    axes[0].set_ylabel("counts")
+    axes[0].legend()
+
+    for curve_index, (name, curve) in enumerate(zip(state["names"], state["curves"])):
+        transfer = np.asarray(energy_kev, dtype=float) * 1000.0 - fits["center_ev"][curve_index]
+        axes[1].plot(transfer, curve, lw=0.8, label=str(name))
+    axes[1].axvline(0.0, color="black", ls="--", lw=0.8)
+    axes[1].set_title("All elastic curves centered at zero energy transfer")
+    axes[1].set_xlabel("Energy Transfer (eV)")
+    axes[1].set_ylabel("counts")
+    if len(state["names"]) <= 30:
+        axes[1].legend(fontsize=6, ncol=3)
+    return figure
+
+
+def _inspect_elastic_fits(ui: UI, state, energy_kev, log) -> None:
+    """Prompt for ROI names and display detailed fit diagnostics."""
+    if not ui.interactive:
+        return
+    available = [str(name) for name in state["names"]]
+    while True:
+        roi_name = ui.ask_optional(
+            "ROI crystal name to inspect (press Enter to continue to XRS)",
+            help_text="The left panel shows the selected fit; the right panel checks zeroed energy transfer.",
+        )
+        if roi_name is None:
+            return
+        if roi_name not in available:
+            log(f"[elastic] Unknown ROI {roi_name!r}. Available: {', '.join(available)}")
+            continue
+        figure = _draw_elastic_inspection(state, energy_kev, roi_name)
+        ui.show_figure(figure, f"Elastic fit inspection: {roi_name}", "Close inspection")
 
 
 # ==========================================================================

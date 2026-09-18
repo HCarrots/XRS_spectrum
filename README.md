@@ -37,10 +37,13 @@ The elastic stage now follows this order:
 3. Choose `regular` or `auto` after inspecting the detector images.
 4. Create new ROI geometry or review and reuse an existing file.
 5. Build masks, integrate every ROI, and fit the elastic peaks.
+6. Print `badFit` and the full `fitResult` table in the terminal.
+7. Optionally enter a crystal name to inspect its fit and verify that all elastic curves are centered at zero energy transfer.
+8. Continue to XRS scan loading after fit inspection is complete.
 
 ### Regular rectangular ROIs
 
-The rectangle editor follows the canonical detector label order. Drag to draw a rectangle, press `S` to skip a label, Backspace to undo, `R` to reset, Enter to finish, or Esc to cancel.
+The rectangle editor follows the canonical detector label order. Drag to draw a rectangle, press `S` to skip a label, `C`, `U`, or Backspace to undo, `R` to redraw the last ROI, `A` to start over, Enter to save the current detector, or Esc to cancel. Enter also accepts an empty detector.
 
 Each detector uses an editable tab-separated file with these columns:
 

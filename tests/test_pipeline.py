@@ -22,7 +22,14 @@ from conftest import (
 )
 from run_xrs import main
 from xrs_config import STAGE_ORDER, Config, ConfigError, environment_parity
-from xrs_pipeline import _prepare_roi_inputs, _remove_i0_glitches, run_stage
+from xrs_pipeline import (
+    _draw_elastic_inspection,
+    _fit_result_table,
+    _inspect_elastic_fits,
+    _prepare_roi_inputs,
+    _remove_i0_glitches,
+    run_stage,
+)
 from xrs_ui import UI
 
 
@@ -463,14 +470,81 @@ def test_run_stage_returns_arrays(work_dir):
     config_path = build_case(work_dir / "case", mode="regular")
     cfg = Config.load(config_path)
     ui = UI(interactive=False)
-    payload = run_stage(cfg, "elastic", ui, log=lambda _m: None)
+    messages = []
+    payload = run_stage(cfg, "elastic", ui, log=messages.append)
     assert payload["roi_names"].shape == (2 * len(REGULAR_BOXES),)
     assert payload["bad_fit"].shape == (2 * len(REGULAR_BOXES),)
     assert int(payload["mask_count"][0]) == 2 * len(REGULAR_BOXES)
     assert payload["image_shape"].tolist() == [48, 60]
+    assert any(message.startswith("[elastic] badFit =") for message in messages)
+    assert any(message.startswith("[elastic] fitResult:\n") for message in messages)
 
     with pytest.raises(ConfigError):
         run_stage(cfg, "not-a-stage", ui, log=lambda _m: None)
+
+
+def _elastic_state_for_inspection():
+    energy = np.asarray([9.67, 9.68, 9.69])
+    return energy, {
+        "names": np.asarray(["VB-A1", "HB-A1"]),
+        "detectors": np.asarray(["lambda", "minipix"]),
+        "boxes": [(1, 4, 2, 6), (3, 7, 5, 9)],
+        "curves": np.asarray([[1.0, 5.0, 1.0], [2.0, 6.0, 2.0]]),
+        "fits": {
+            "center_ev": np.asarray([9680.0, 9685.0]),
+            "center_kev": np.asarray([9.680, 9.685]),
+            "fwhm_ev": np.asarray([1.2, 1.5]),
+            "amp": np.asarray([4.0, 5.0]),
+            "bkg": np.asarray([1.0, 2.0]),
+            "r2": np.asarray([0.99, 0.75]),
+        },
+        "bad": np.asarray([False, True]),
+    }
+
+
+def test_fit_result_table_and_elastic_inspection_plot():
+    import matplotlib.pyplot as plt
+
+    energy, state = _elastic_state_for_inspection()
+    table = _fit_result_table(state)
+    assert list(table["crystal"]) == ["VB-A1", "HB-A1"]
+    assert list(table["bad_fit"]) == [False, True]
+    assert table.loc[0, "center"] == pytest.approx(9680.0)
+
+    figure = _draw_elastic_inspection(state, energy, "VB-A1")
+    assert len(figure.axes) == 2
+    assert len(figure.axes[0].lines) == 2
+    assert np.allclose(
+        figure.axes[1].lines[0].get_xdata(), energy * 1000.0 - 9680.0
+    )
+    assert figure.axes[1].get_xlabel() == "Energy Transfer (eV)"
+    plt.close(figure)
+
+
+def test_elastic_inspection_reprompts_and_continues_to_xrs():
+    import matplotlib.pyplot as plt
+
+    energy, state = _elastic_state_for_inspection()
+    responses = iter(["missing", "VB-A1", None])
+    shown = []
+    messages = []
+
+    class InspectUI:
+        interactive = True
+
+        @staticmethod
+        def ask_optional(*_args, **_kwargs):
+            return next(responses)
+
+        @staticmethod
+        def show_figure(figure, title, button_label):
+            shown.append((figure, title, button_label))
+
+    _inspect_elastic_fits(InspectUI(), state, energy, messages.append)
+    assert any("Unknown ROI" in message for message in messages)
+    assert len(shown) == 1
+    assert "VB-A1" in shown[0][1]
+    plt.close(shown[0][0])
 
 
 # ==========================================================================
@@ -749,9 +823,11 @@ def test_adjust_abort_raises(monkeypatch):
 
 
 def _accept_immediately(monkeypatch):
-    return _interactive_ui(
+    ui, plt = _interactive_ui(
         monkeypatch, lambda figure, state: state.update(done=True, accepted=True)
     )
+    monkeypatch.setattr(ui, "ask_optional", lambda *_args, **_kwargs: None)
+    return ui, plt
 
 
 def test_elastic_stage_interactive_tuning(work_dir, monkeypatch):

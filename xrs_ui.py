@@ -244,6 +244,41 @@ class UI:
             return default
         return raw in {"y", "yes"}
 
+    def ask_optional(self, label: str, help_text: str = ""):
+        """Return optional text input, or None when the user presses Enter."""
+        if not self.interactive:
+            return None
+        self.require(label)
+        if help_text:
+            print(f"  {help_text}")
+        try:
+            value = input(f"{label}: ").strip()
+        except EOFError:
+            return None
+        return value or None
+
+    def show_figure(self, figure, title: str, button_label: str = "Continue") -> None:
+        """Show an inspection figure until the user continues or closes it."""
+        self.require(title)
+        import matplotlib.pyplot as plt
+        from matplotlib.widgets import Button
+
+        state = {"done": False, "accepted": False}
+        button_axis = figure.add_axes([0.43, 0.02, 0.14, 0.055])
+        continue_button = Button(button_axis, button_label, color="0.85")
+        continue_button.on_clicked(
+            lambda _event: state.update(done=True, accepted=True)
+        )
+        _keep_widgets_alive(figure, continue_button)
+        figure.suptitle(title)
+        figure.canvas.mpl_connect(
+            "key_press_event",
+            lambda event: state.update(done=True, accepted=True)
+            if event.key in {"enter", "escape"} else None,
+        )
+        _run_event_loop(figure, state)
+        plt.close(figure)
+
     def preview_images(self, images, title="Elastic detector preview") -> None:
         """Show summed detector images and wait for explicit confirmation."""
         self.require(title)
